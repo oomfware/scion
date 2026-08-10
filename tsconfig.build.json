@@ -1,0 +1,11 @@
+// emits dist/. the base config covers test/ too, which must never reach the published output.
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"removeComments": true,
+		"rootDir": "src",
+		"outDir": "dist"
+	},
+	"include": ["src"]
+}

@@ -1,0 +1,29 @@
+{
+	"name": "@oomfware/scion-bench",
+	"version": "0.0.0",
+	"private": true,
+	"description": "browser benchmark suites for scion, measured against React, Preact, and Redact",
+	"license": "0BSD",
+	"type": "module",
+	"scripts": {
+		"bench": "node bench.mjs",
+		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.scion.json && tsc -p tsconfig.preact.json && tsc -p tsconfig.redact.json"
+	},
+	"dependencies": {
+		"@oomfware/scion": "workspace:*",
+		"@tanstack/query-core": "5.101.4",
+		"@tanstack/redact": "0.0.17",
+		"jotai": "2.20.2",
+		"preact": "11.0.0-rc.0",
+		"react": "19.2.8",
+		"react-dom": "19.2.8",
+		"zustand": "5.0.14"
+	},
+	"devDependencies": {
+		"@types/react": "^19.2.18",
+		"@types/react-dom": "^19.2.4",
+		"playwright": "^1.62.1",
+		"typescript": "^7.0.2",
+		"vite": "^8.2.1"
+	}
+}

@@ -1,0 +1,81 @@
+{
+	"name": "@oomfware/scion",
+	"version": "0.0.0",
+	"description": "lightweight, drop-in React 19 replacement for synchronous browser apps",
+	"license": "0BSD",
+	"repository": {
+		"type": "git",
+		"url": "https://tangled.org/did:plc:u42yobetcaqpbend2j7eibaw"
+	},
+	"files": [
+		"dist/",
+		"types/"
+	],
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./types/runtime.d.ts",
+			"default": "./dist/runtime.js"
+		},
+		"./compiler-runtime": {
+			"types": "./types/compiler-runtime.d.ts",
+			"default": "./dist/compiler-runtime.js"
+		},
+		"./jsx-runtime": {
+			"types": "./types/jsx-runtime.d.ts",
+			"default": "./dist/jsx-runtime.js"
+		},
+		"./react": {
+			"types": "./types/react.d.ts",
+			"default": "./dist/react.js"
+		},
+		"./react-dom": {
+			"types": "./types/react-dom.d.ts",
+			"default": "./dist/react-dom.js"
+		},
+		"./react-dom-client": {
+			"types": "./types/react-dom-client.d.ts",
+			"default": "./dist/react-dom-client.js"
+		},
+		"./scheduler": {
+			"types": "./types/scheduler.d.ts",
+			"default": "./dist/scheduler.js"
+		},
+		"./use-sync-external-store-shim": {
+			"types": "./types/use-sync-external-store-shim.d.ts",
+			"default": "./dist/use-sync-external-store-shim.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"build": "oxlint && tsc -p tsconfig.build.json",
+		"dev": "tsc -p tsconfig.build.json --watch",
+		"fmt": "oxfmt",
+		"lint": "oxlint",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"prepublishOnly": "pnpm run build"
+	},
+	"dependencies": {
+		"csstype": "^3.2.3",
+		"esm-env": "^1.2.2"
+	},
+	"devDependencies": {
+		"@types/node": "^26.2.0",
+		"@types/react": "^19.2.18",
+		"@types/react-dom": "^19.2.4",
+		"bumpp": "^12.2.0",
+		"happy-dom": "^20.11.2",
+		"oxfmt": "^0.62.0",
+		"oxlint": "^1.77.0",
+		"oxlint-tsgolint": "^7.0.2001",
+		"react": "19.2.8",
+		"react-dom": "19.2.8",
+		"react-refresh": "^0.18.0",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.10"
+	}
+}

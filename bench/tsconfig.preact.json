@@ -1,0 +1,10 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"jsxImportSource": "preact",
+		"paths": {
+			"runtime-under-test": ["./runtimes/preact.ts"]
+		}
+	},
+	"include": ["fixtures", "runtimes/preact.ts"]
+}

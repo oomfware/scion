@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"target": "esnext",
+		"lib": ["esnext", "dom", "dom.iterable"],
+		"types": ["node"],
+		"moduleDetection": "force",
+		// no source file uses jsx; the tests do, and they build their elements with real react's runtime
+		// so that one element object can be fed to either renderer.
+		"jsx": "react-jsx",
+		"jsxImportSource": "react",
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"resolveJsonModule": true,
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+		"strict": true,
+		"noUnusedLocals": true,
+		"noEmit": true,
+		"isolatedModules": false,
+		"preserveConstEnums": false,
+		"verbatimModuleSyntax": false,
+		"skipLibCheck": true
+	},
+	"include": ["src", "test", "vitest.config.ts"]
+}

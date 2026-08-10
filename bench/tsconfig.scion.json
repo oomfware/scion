@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"jsxImportSource": "@oomfware/scion",
+		"skipLibCheck": false,
+		"paths": {
+			"runtime-under-test": ["./runtimes/scion.ts"]
+		}
+	},
+	"include": ["fixtures", "runtimes/scion.ts"]
+}

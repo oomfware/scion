@@ -1,0 +1,17 @@
+// typechecks the vendored declarations the way a consumer sees them: through the package name, with
+// jsx resolved from `@oomfware/scion/jsx-runtime`. run with `pnpm run test:types`.
+{
+	"extends": "../../tsconfig.json",
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"jsxImportSource": "@oomfware/scion",
+		"paths": {
+			"@oomfware/scion": ["../../types/runtime.d.ts"],
+			"@oomfware/scion/*": ["../../types/*.d.ts"]
+		},
+		"types": [],
+		"noEmit": true,
+		"noUnusedLocals": false
+	},
+	"include": ["."]
+}

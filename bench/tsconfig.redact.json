@@ -1,0 +1,9 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"paths": {
+			"runtime-under-test": ["./runtimes/redact.ts"]
+		}
+	},
+	"include": ["fixtures", "runtimes/redact.ts"]
+}

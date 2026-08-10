@@ -1,0 +1,60 @@
+{
+	"$schema": "https://unpkg.com/oxlint/configuration_schema.json",
+	"options": {
+		"typeAware": true,
+		"typeCheck": true
+	},
+	"categories": {
+		"correctness": "warn",
+		"suspicious": "warn",
+		"perf": "warn"
+	},
+	"rules": {
+		"curly": "warn",
+		"no-control-regex": "off",
+		"no-underscore-dangle": [
+			"warn",
+			{
+				"allow": [
+					"__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE",
+					"__REACT_DEVTOOLS_GLOBAL_HOOK__",
+					"__html",
+					"_getMountedRootCount",
+					"_context",
+					"_defaultValue",
+					"_init",
+					"_load",
+					"_payload",
+					"_status",
+					"_value",
+					"__scion",
+					"__scion$click",
+					"__scionControlled",
+					"__scionDispatch",
+					"__scionFiber",
+					"__scionPortalInvoked"
+				]
+			}
+		],
+		"unicorn/switch-case-braces": ["warn", "always"]
+	},
+	"overrides": [
+		{
+			"files": ["bench/**/*.mjs", "bench/**/*.ts", "bench/**/*.tsx"],
+			"rules": {
+				"no-await-in-loop": "off",
+				"unicorn/consistent-function-scoping": "off"
+			}
+		},
+		{
+			"files": ["test/**/*.ts", "test/**/*.tsx"],
+			"rules": {
+				"typescript/no-floating-promises": "off",
+				"no-await-in-loop": "off",
+				"typescript/await-thenable": "off",
+				"unicorn/consistent-function-scoping": "off",
+				"typescript/no-unsafe-type-assertion": "off"
+			}
+		}
+	]
+}

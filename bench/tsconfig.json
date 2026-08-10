@@ -1,0 +1,23 @@
+{
+	"compilerOptions": {
+		"target": "esnext",
+		"lib": ["esnext", "dom", "dom.iterable"],
+		"types": [],
+		"moduleDetection": "force",
+		"jsx": "react-jsx",
+		"jsxImportSource": "react",
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"strict": true,
+		"noUnusedLocals": true,
+		"noEmit": true,
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"skipLibCheck": true,
+		"paths": {
+			"runtime-under-test": ["./runtimes/react.ts"]
+		}
+	},
+	"include": ["fixtures", "runtimes/react.ts"]
+}
