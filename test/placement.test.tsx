@@ -103,6 +103,59 @@ test('siblings that are all empty resolve their slots independently', async () =
 	});
 });
 
+test('a fragment growing under an ancestor update appends after its existing child', async () => {
+	await expectAgreement(async (scenario) => {
+		let show: ((value: boolean) => void) | undefined;
+		const Screen = () => {
+			const [visible, setVisible] = useState(false);
+			show = setVisible;
+			return (
+				<div>
+					<Fragment>
+						<b>header</b>
+						{visible ? <i>list</i> : null}
+					</Fragment>
+				</div>
+			);
+		};
+
+		await scenario.render(<Screen />);
+		scenario.snapshot('header only');
+
+		await scenario.act(() => show?.(true));
+		scenario.snapshot('list after header');
+
+		await scenario.act(() => show?.(false));
+		scenario.snapshot('header only again');
+	});
+});
+
+test('a keyed reorder that also grows a moved child keeps each subtree together', async () => {
+	await expectAgreement(async (scenario) => {
+		const Item = ({ name, count }: { name: string; count: number }) => (
+			<Fragment>
+				<dt>{name}</dt>
+				{Array.from({ length: count }, (_, index) => (
+					<dd key={index}>{`${name}${index}`}</dd>
+				))}
+			</Fragment>
+		);
+		const Host = ({ order, counts }: { order: string[]; counts: Record<string, number> }) => (
+			<dl>
+				{order.map((name) => (
+					<Item key={name} name={name} count={counts[name]} />
+				))}
+			</dl>
+		);
+
+		await scenario.render(<Host order={['a', 'b', 'c']} counts={{ a: 1, b: 1, c: 1 }} />);
+		scenario.snapshot('initial');
+
+		await scenario.render(<Host order={['c', 'a', 'b']} counts={{ a: 2, b: 0, c: 1 }} />);
+		scenario.snapshot('rotated and regrown');
+	});
+});
+
 test('a stateful row updates without disturbing its keyed siblings', async () => {
 	await expectAgreement(async (scenario) => {
 		const setters = new Map<string, (value: number) => void>();

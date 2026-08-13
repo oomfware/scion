@@ -1504,7 +1504,15 @@ const reconcileChildren = (
 			}
 
 			const stable = match !== undefined && stableMatches?.[index] === STABLE_CHILD;
-			const before = stable && match ? (lastNode(match)?.nextSibling ?? cursor) : cursor;
+			// reconcile stable children after their existing nodes.
+			let before = cursor;
+			if (ordered) {
+				before = nextPreviousNode(previous, scan, pass, end);
+			} else if (stable && match) {
+				const keeping = lastNode(match);
+				before = keeping ? keeping.nextSibling : cursor;
+			}
+
 			const fiber = reconcileFiber(parent, match, value, container, before, root);
 
 			fiber.index = index;
@@ -1512,7 +1520,7 @@ const reconcileChildren = (
 			if (match) {
 				if (ordered) {
 					if (fiber.firstHost) {
-						cursor = nextPreviousNode(previous, scan, pass, end);
+						cursor = before;
 					}
 				} else {
 					const first = fiber.firstHost;
