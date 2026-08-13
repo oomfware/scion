@@ -326,6 +326,7 @@ let reconcileDepth = 0;
 let reconcilePass = 0;
 
 let batching = 0;
+let draining = false;
 let flushing = false;
 let passiveScheduled = false;
 let synchronousEffects = 0;
@@ -1084,6 +1085,17 @@ const scheduleRootWork = (root: Root, fiber: Fiber) => {
 	}
 };
 
+const renderPass = (root: Root) => {
+	root.scheduled = false;
+	if (root.fullRender) {
+		root.fullRender = false;
+		// renderRoot consumes the queue; discarding it would drop those updates.
+		renderRoot(root);
+	} else {
+		renderDirtyFibers(root);
+	}
+};
+
 const flushRoots = () => {
 	if (flushing) {
 		return;
@@ -1097,17 +1109,25 @@ const flushRoots = () => {
 			if (!root.scheduled) {
 				continue;
 			}
-			root.scheduled = false;
-			if (root.fullRender) {
-				root.fullRender = false;
-				// renderRoot consumes the queue; discarding it would drop those updates.
-				renderRoot(root);
-			} else {
-				renderDirtyFibers(root);
-			}
+			renderPass(root);
 		}
 	} finally {
 		flushing = false;
+	}
+};
+
+// commit updates must finish before later microtasks observe the DOM.
+const drainCascade = (root: Root) => {
+	if (draining || renderingRoot) {
+		return;
+	}
+	draining = true;
+	try {
+		for (let pass = 0; pass < CASCADE_LIMIT && root.scheduled && !root.disposed; pass++) {
+			renderPass(root);
+		}
+	} finally {
+		draining = false;
 	}
 };
 
@@ -1160,6 +1180,8 @@ const renderRoot = (root: Root) => {
 	} finally {
 		renderingRoot = previousRoot;
 	}
+
+	drainCascade(root);
 };
 
 // match React's nested update limit.
@@ -1234,6 +1256,8 @@ const renderDirtyFibers = (root: Root) => {
 	} finally {
 		renderingRoot = previousRoot;
 	}
+
+	drainCascade(root);
 };
 
 const commitRoot = (root: Root, failed: boolean) => {

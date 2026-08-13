@@ -96,6 +96,25 @@ test('many independent renders in one task are all applied', async () => {
 	expect(errors).toEqual([]);
 });
 
+test('a microtask queued in a layout effect runs after the update that effect schedules', async () => {
+	await expectAgreement(async (scenario) => {
+		const Child = () => (
+			<i ref={(node) => scenario.log('child ref', node === null ? 'detached' : 'attached')} />
+		);
+		const Parent = () => {
+			const [mounted, setMounted] = useState(false);
+			useLayoutEffect(() => {
+				scenario.log('layout effect');
+				queueMicrotask(() => scenario.log('microtask'));
+				setMounted(true);
+			}, []);
+			return <div>{mounted ? <Child /> : null}</div>;
+		};
+
+		await scenario.render(<Parent />);
+	});
+});
+
 test('a render reentered from unmount teardown is ignored', async () => {
 	// bypass the harness so the cleanup can reach the root itself.
 	const container = document.createElement('div');
