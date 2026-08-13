@@ -310,6 +310,108 @@ test('a keyed reorder moves component-wrapped subtrees as units', async () => {
 	});
 });
 
+test('a keyed child that renders nothing materializes in its moved position', async () => {
+	await expectAgreement(async (scenario) => {
+		const Slot = ({ name, filled }: { name: string; filled: boolean }) => (filled ? <i>{name}</i> : null);
+		const Host = ({ order, filled }: { order: string[]; filled: string[] }) => (
+			<div>
+				{order.map((name) => (
+					<Slot key={name} name={name} filled={filled.includes(name)} />
+				))}
+			</div>
+		);
+
+		await scenario.render(<Host order={['a', 'b', 'c']} filled={['a', 'c']} />);
+		scenario.snapshot('b empty');
+		await scenario.render(<Host order={['b', 'a', 'c']} filled={['a', 'b', 'c']} />);
+		scenario.snapshot('b moved and filled');
+		await scenario.render(<Host order={['b', 'a', 'c']} filled={['a', 'c']} />);
+		scenario.snapshot('b emptied in place');
+	});
+});
+
+test('a moved multi-node child grows and shrinks as one unit', async () => {
+	await expectAgreement(async (scenario) => {
+		const Group = ({ name, count }: { name: string; count: number }) => (
+			<Fragment>
+				{Array.from({ length: count }, (_, index) => (
+					<i key={index}>{`${name}${index}`}</i>
+				))}
+			</Fragment>
+		);
+		const Host = ({ order, counts }: { order: string[]; counts: Record<string, number> }) => (
+			<div>
+				{order.map((name) => (
+					<Group key={name} name={name} count={counts[name]} />
+				))}
+			</div>
+		);
+
+		await scenario.render(<Host order={['a', 'b', 'c']} counts={{ a: 2, b: 2, c: 2 }} />);
+		scenario.snapshot('initial');
+		await scenario.render(<Host order={['c', 'a', 'b']} counts={{ a: 0, b: 2, c: 3 }} />);
+		scenario.snapshot('rotated, grown and emptied');
+		await scenario.render(<Host order={['c', 'a', 'b']} counts={{ a: 2, b: 1, c: 1 }} />);
+		scenario.snapshot('refilled');
+	});
+});
+
+test('a moved child updates on its own after the reorder settles', async () => {
+	await expectAgreement(async (scenario) => {
+		const setters = new Map<string, (value: number) => void>();
+		const Group = ({ name }: { name: string }) => {
+			const [count, setCount] = useState(0);
+			setters.set(name, setCount);
+			return (
+				<Fragment>
+					{Array.from({ length: count }, (_, index) => (
+						<i key={index}>{`${name}${index}`}</i>
+					))}
+				</Fragment>
+			);
+		};
+		const Host = ({ order }: { order: string[] }) => (
+			<div>
+				<b>head</b>
+				{order.map((name) => (
+					<Group key={name} name={name} />
+				))}
+				<b>tail</b>
+			</div>
+		);
+
+		await scenario.render(<Host order={['a', 'b', 'c']} />);
+		await scenario.render(<Host order={['c', 'a', 'b']} />);
+		scenario.snapshot('rotated while empty');
+		await scenario.act(() => setters.get('c')?.(2));
+		scenario.snapshot('moved child filled');
+		await scenario.act(() => setters.get('a')?.(1));
+		scenario.snapshot('middle child filled');
+	});
+});
+
+test('keyed and unkeyed children with holes reconcile side by side', async () => {
+	await expectAgreement(async (scenario) => {
+		const Host = ({ order, show }: { order: string[]; show: boolean }) => (
+			<div>
+				{show ? <i>lead</i> : null}
+				{order.map((name) => (
+					<b key={name}>{name}</b>
+				))}
+				{null}
+				{show && <em>trail</em>}
+			</div>
+		);
+
+		await scenario.render(<Host order={['a', 'b']} show />);
+		scenario.snapshot('initial');
+		await scenario.render(<Host order={['b', 'a']} show={false} />);
+		scenario.snapshot('reordered without the holes filled');
+		await scenario.render(<Host order={['b', 'a']} show />);
+		scenario.snapshot('holes refilled');
+	});
+});
+
 test('a keyed reorder preserves the state of nodes moved within their parent', async () => {
 	let moves = 0;
 	await runScenario(scionRuntime, async (scenario) => {

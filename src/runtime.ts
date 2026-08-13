@@ -305,10 +305,12 @@ const SUPPORTS_MOVE_BEFORE = typeof Element !== 'undefined' && 'moveBefore' in E
 let dirtyRoots: Root[] = [];
 const roots = new Set<Root>();
 
-const childBuffers: Array<Array<Child | boolean | null>> = [];
 const EMPTY_CHILDREN: Fiber[] = [];
-// stands in for a fiber's props until its first update; never mutated.
+const EMPTY_MATCHES: (Fiber | undefined)[] = [];
 const EMPTY_PROPS: Props = {};
+
+const childBuffers: Array<Array<Child | boolean | null>> = [];
+
 const effectRestores: Array<{
 	deps?: ReadonlyArray<unknown>;
 	effect: () => void | (() => void);
@@ -1256,8 +1258,8 @@ const commitRoot = (root: Root, failed: boolean) => {
 
 // #region reconciliation
 
-// marks a child that keeps its DOM position, so only its siblings have to move.
-const STABLE_CHILD = -1;
+// marks claimed children outside the stable subsequence.
+const MOVED_CHILD = 1;
 
 // null, empty strings, and booleans render nothing, so they claim no fiber and no slot.
 const isRenderableChild = (value: Child | boolean | null | undefined): value is Child =>
@@ -1281,26 +1283,25 @@ const matchesInOrder = (candidate: Fiber | undefined, value: Child, key: Key, in
 	compatible(candidate, value);
 
 // a repeated key keeps only its last fiber in the index, as React does; the rest remount.
-const matchRemaining = (
+const matchByKey = (
 	previous: Fiber[],
 	values: Array<Child | boolean | null>,
+	matches: Array<Fiber | undefined>,
 	start: number,
 	scanStart: number,
 	pass: number,
-): Array<Fiber | undefined> => {
-	const previousIndex = new Map<number | string, Fiber>();
+) => {
+	const byKey = new Map<number | string, Fiber>();
 	for (const fiber of previous) {
-		previousIndex.set(fiber.key ?? fiber.index, fiber);
+		byKey.set(fiber.key ?? fiber.index, fiber);
 	}
-
-	// oxlint-disable-next-line unicorn/no-new-array
-	const matches = new Array<Fiber | undefined>(values.length);
 
 	let scan = scanStart;
 	for (let index = start; index < values.length; index++) {
 		const value = values[index];
 
 		if (!isRenderableChild(value)) {
+			matches.push(undefined);
 			continue;
 		}
 
@@ -1312,8 +1313,9 @@ const matchRemaining = (
 		if (matchesInOrder(match, value, key, index)) {
 			scan++;
 		} else {
-			const indexed = previousIndex.get(key ?? index);
+			const indexed = byKey.get(key ?? index);
 			if (indexed === undefined || indexed.pass === pass || !compatible(indexed, value)) {
+				matches.push(undefined);
 				continue;
 			}
 
@@ -1321,15 +1323,52 @@ const matchRemaining = (
 		}
 
 		match.pass = pass;
-		matches[index] = match;
+		matches.push(match);
 	}
-	return matches;
 };
 
-// children whose previous slots already increase can stay put; the rest have to move.
-// each entry holds the length of the longest such run ending there, then `STABLE_CHILD` for the run itself.
-const stableChildPositions = (matches: Array<Fiber | undefined>): Int32Array => {
-	const lengths = new Int32Array(matches.length);
+// returns whether matching left source order.
+const matchChildren = (
+	previous: Fiber[],
+	values: Array<Child | boolean | null>,
+	matches: Array<Fiber | undefined>,
+	pass: number,
+): boolean => {
+	let scan = 0;
+
+	for (let index = 0; index < values.length; index++) {
+		const value = values[index];
+
+		if (!isRenderableChild(value)) {
+			matches.push(undefined);
+			continue;
+		}
+
+		scan = skipClaimed(previous, scan, pass);
+		const candidate = previous[scan];
+
+		if (matchesInOrder(candidate, value, childKeyOf(value), index)) {
+			candidate.pass = pass;
+			matches.push(candidate);
+			scan++;
+			continue;
+		}
+
+		if (candidate === undefined) {
+			matches.push(undefined);
+			continue;
+		}
+
+		matchByKey(previous, values, matches, index, scan, pass);
+		return true;
+	}
+
+	return false;
+};
+
+// marks children outside the longest increasing slot subsequence.
+const markMovedChildren = (matches: Array<Fiber | undefined>): Int32Array => {
+	const runs = new Int32Array(matches.length);
 	// tails[length - 1] is the smallest slot that can end a run of that length.
 	const tails: number[] = [];
 	for (let index = 0; index < matches.length; index++) {
@@ -1350,19 +1389,26 @@ const stableChildPositions = (matches: Array<Fiber | undefined>): Int32Array => 
 		}
 
 		tails[low] = match.slot;
-		lengths[index] = low + 1;
+		runs[index] = low + 1;
 	}
 
-	// walking back, the first entry of each length belongs to the longest run.
+	// reconstruct the longest increasing subsequence.
 	let remaining = tails.length;
-	for (let index = matches.length - 1; remaining > 0; index--) {
-		if (lengths[index] === remaining) {
-			lengths[index] = STABLE_CHILD;
+	for (let index = matches.length - 1; index >= 0; index--) {
+		const run = runs[index];
+		if (run === 0) {
+			continue;
+		}
+
+		if (run === remaining) {
+			runs[index] = 0;
 			remaining--;
+		} else {
+			runs[index] = MOVED_CHILD;
 		}
 	}
 
-	return lengths;
+	return runs;
 };
 
 // elements, text, and holes reconcile in place; anything else has to be flattened first.
@@ -1388,19 +1434,7 @@ const directChildArray = (children: any): Array<Child | boolean | null> | null =
 
 	return children;
 };
-const nextPreviousNode = (previous: Fiber[], start: number, pass: number, end: Node | null): Node | null => {
-	for (let index = start; index < previous.length; index++) {
-		const fiber = previous[index];
-
-		if (fiber.pass !== pass && fiber.firstHost) {
-			return fiber.firstHost;
-		}
-	}
-
-	return end;
-};
-
-// detach dropped nodes before mounting replacements to avoid costly live DOM updates.
+// detach dropped nodes before mounting replacements to reduce live DOM work.
 const detachDropped = (previous: Fiber[], pass: number, end: Node | null): Array<Node | null> | null => {
 	let detached: Array<Node | null> | null = null;
 
@@ -1430,6 +1464,18 @@ const restoreDetached = (container: HostContainer, detached: Array<Node | null>)
 	}
 };
 
+// finds the next claimed child that stays in place.
+const nextKeptChild = (matches: Array<Fiber | undefined>, moves: Int32Array | null, from: number): number => {
+	for (let index = from; index < matches.length; index++) {
+		const match = matches[index];
+		if (match !== undefined && match.firstHost !== null && (moves === null || moves[index] !== MOVED_CHILD)) {
+			return index;
+		}
+	}
+
+	return matches.length;
+};
+
 const reconcileChildren = (
 	parent: Fiber | null,
 	previous: Fiber[],
@@ -1451,89 +1497,48 @@ const reconcileChildren = (
 
 	let next: Fiber[] | null = null;
 	let mounted: Fiber[] | null = null;
-
-	// start at the first existing node.
-	let cursor: Node | null = nextChildNode(previous, 0, end);
-
-	// stay allocation-free while old and new children remain in order.
-	let scan = 0;
-	let reorderedMatches: Array<Fiber | undefined> | null = null;
-	let stableMatches: Int32Array | null = null;
+	let matches = EMPTY_MATCHES;
+	let moves: Int32Array | null = null;
 	let detached: Array<Node | null> | null = null;
 
 	try {
+		// plan matches before placement so anchors use valid claims.
+		if (previous.length !== 0) {
+			matches = [];
+			if (matchChildren(previous, values, matches, pass)) {
+				moves = markMovedChildren(matches);
+				detached = detachDropped(previous, pass, end);
+			}
+		}
+
+		// place changes before the next child that stays in place.
+		const claimed = matches.length !== 0;
+		let kept = claimed ? 0 : values.length;
+		let anchor = end;
+
 		for (let index = 0; index < values.length; index++) {
 			const value = values[index];
 			if (!isRenderableChild(value)) {
 				continue;
 			}
 
-			let match: Fiber | undefined;
-			let ordered = false;
-			if (reorderedMatches) {
-				match = reorderedMatches[index];
-			} else {
-				const key = childKeyOf(value);
-				scan = skipClaimed(previous, scan, pass);
-				const candidate = previous[scan];
-
-				if (matchesInOrder(candidate, value, key, index)) {
-					match = candidate;
-					match.pass = pass;
-					ordered = true;
-					scan++;
-				} else if (candidate !== undefined) {
-					reorderedMatches = matchRemaining(previous, values, index, scan, pass);
-					stableMatches = stableChildPositions(reorderedMatches);
-					detached = detachDropped(previous, pass, end);
-					cursor = end;
-
-					for (let remaining = index; remaining < reorderedMatches.length; remaining++) {
-						const stable = reorderedMatches[remaining];
-						if (stable && stableMatches[remaining] === STABLE_CHILD) {
-							const found = stable.firstHost;
-							if (found) {
-								cursor = found;
-								break;
-							}
-						}
-					}
-
-					match = reorderedMatches[index];
-				}
+			if (kept <= index) {
+				kept = nextKeptChild(matches, moves, index + 1);
+				anchor = kept < matches.length ? matches[kept]!.firstHost : end;
 			}
 
-			const stable = match !== undefined && stableMatches?.[index] === STABLE_CHILD;
-			// reconcile stable children after their existing nodes.
-			let before = cursor;
-			if (ordered) {
-				before = nextPreviousNode(previous, scan, pass, end);
-			} else if (stable && match) {
-				const keeping = lastNode(match);
-				before = keeping ? keeping.nextSibling : cursor;
-			}
-
-			const fiber = reconcileFiber(parent, match, value, container, before, root);
+			const match = claimed ? matches[index] : undefined;
+			const held = match !== undefined && match.firstHost !== null;
+			const fiber = reconcileFiber(parent, match, value, container, anchor, root);
 
 			fiber.index = index;
 
-			if (match) {
-				if (ordered) {
-					if (fiber.firstHost) {
-						cursor = before;
-					}
-				} else {
-					const first = fiber.firstHost;
-					if (first !== null) {
-						if (stable || first === cursor) {
-							cursor = lastNode(fiber)!.nextSibling;
-						} else {
-							forEachNode(fiber, (node) => moveNode(container, node, cursor));
-						}
-					}
-				}
-			} else {
+			if (match === undefined) {
 				(mounted ??= []).push(fiber);
+			}
+
+			if (held && moves !== null && moves[index] === MOVED_CHILD && fiber.firstHost !== anchor) {
+				forEachNode(fiber, (node) => moveNode(container, node, anchor));
 			}
 
 			next ??= [];
@@ -2398,27 +2403,6 @@ const refreshAncestorFirstHosts = (fiber: Fiber) => {
 	let parent = fiber.parent;
 	while (parent && refreshFirstHost(parent)) {
 		parent = parent.parent;
-	}
-};
-
-const lastNode = (fiber: Fiber): Node | null => {
-	switch (fiber.kind) {
-		case FiberKind.Host:
-		case FiberKind.Text: {
-			return fiber.node;
-		}
-		case FiberKind.Portal: {
-			return null;
-		}
-		default: {
-			for (let index = fiber.children.length - 1; index >= 0; index--) {
-				const found = lastNode(fiber.children[index]);
-				if (found) {
-					return found;
-				}
-			}
-			return null;
-		}
 	}
 };
 

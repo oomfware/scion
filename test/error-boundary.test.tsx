@@ -42,6 +42,32 @@ test('a function fallback receives the error', async () => {
 	expect(result.snapshots).toEqual([['fallback', '<b >\n  #text "kaboom"']]);
 });
 
+test('a throw during a keyed reorder leaves nothing behind but the fallback', async () => {
+	const result = await run(async (scenario) => {
+		const Row = ({ name, explode }: { name: string; explode: boolean }) => {
+			if (explode) {
+				throw new Error(`bad ${name}`);
+			}
+			return <li>{name}</li>;
+		};
+		const List = ({ order, explode }: { order: string[]; explode: string | null }) => (
+			<ErrorBoundary fallback={(error: Error) => <b>{error.message}</b>}>
+				<ul>
+					{order.map((name) => (
+						<Row key={name} name={name} explode={name === explode} />
+					))}
+				</ul>
+			</ErrorBoundary>
+		);
+
+		await scenario.render(<List order={['a', 'b', 'c', 'd']} explode={null} />);
+		scenario.snapshot('initial');
+		await scenario.render(<List order={['d', 'b']} explode="b" />);
+		scenario.snapshot('after the failed reorder');
+	});
+	expect(result.snapshots[1][1]).toBe('<b >\n  #text "bad b"');
+});
+
 test('siblings outside the boundary keep rendering', async () => {
 	const result = await run(async (scenario) => {
 		await scenario.render(
