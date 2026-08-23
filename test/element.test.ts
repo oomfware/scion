@@ -134,3 +134,21 @@ test('lazy exposes the _payload/_init pair libraries reach for to preload', () =
 		expect(component._payload, runtime.version).toBeDefined();
 	}
 });
+
+test('a pending lazy throws the loader promise itself, so a discarded prime leaks no rejection', async () => {
+	for (const runtime of [scion, react]) {
+		const loading = Promise.reject(new Error('module is gone'));
+		const component = runtime.lazy(() => loading) as any;
+
+		let thrown: unknown;
+		try {
+			component._init(component._payload);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown, runtime.version).toBe(loading);
+	}
+
+	await Promise.resolve();
+});

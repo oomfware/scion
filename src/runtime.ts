@@ -3320,27 +3320,37 @@ const readThenable = <Value>(thenable: TrackedThenable<Value>): Value => {
 };
 
 const resolveLazy = (type: any) => {
-	if (type._status === 'resolved') {
-		return type._value;
+	switch (type._status) {
+		case 'resolved': {
+			return type._value;
+		}
+		case 'rejected': {
+			throw type._value;
+		}
+
+		case 'uninitialized': {
+			const thenable = type._load();
+
+			type._status = 'pending';
+			type._value = thenable;
+
+			thenable.then(
+				(module: { default: any }) => {
+					if (type._status === 'pending') {
+						type._status = 'resolved';
+						type._value = module.default;
+					}
+				},
+				(error: unknown) => {
+					if (type._status === 'pending') {
+						type._status = 'rejected';
+						type._value = error;
+					}
+				},
+			);
+		}
 	}
-	if (type._status === 'rejected') {
-		throw type._value;
-	}
-	if (type._status === 'uninitialized') {
-		type._status = 'pending';
-		type._value = type._load().then(
-			(module: { default: any }) => {
-				type._status = 'resolved';
-				type._value = module.default;
-				return module.default;
-			},
-			(error: unknown) => {
-				type._status = 'rejected';
-				type._value = error;
-				throw error;
-			},
-		);
-	}
+
 	throw type._value;
 };
 
