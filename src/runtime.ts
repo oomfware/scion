@@ -1458,6 +1458,15 @@ const directChildArray = (children: any): Array<Child | boolean | null> | null =
 
 	return children;
 };
+
+const unwrapSoleFragment = (children: any): any => {
+	if (isValidElement(children) && children.type === FRAGMENT && children.key === null) {
+		return children.props.children;
+	}
+
+	return children;
+};
+
 // detach dropped nodes before mounting replacements to reduce live DOM work.
 const detachDropped = (previous: Fiber[], pass: number, end: Node | null): Array<Node | null> | null => {
 	let detached: Array<Node | null> | null = null;
@@ -1508,11 +1517,13 @@ const reconcileChildren = (
 	end: Node | null,
 	root: Root,
 ): Fiber[] => {
+	const unwrapped = unwrapSoleFragment(children);
+
 	// flat JSX arrays can feed the diff without a copy.
-	const directValues = directChildArray(children);
+	const directValues = directChildArray(unwrapped);
 	const values = directValues ?? (childBuffers[reconcileDepth] ??= []);
 	if (directValues === null) {
-		flattenChildrenInto(children, values);
+		flattenChildrenInto(unwrapped, values);
 	}
 
 	reconcileDepth++;

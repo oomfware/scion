@@ -199,6 +199,76 @@ test('keyed fragments reorder as units', async () => {
 	});
 });
 
+test('a sole unkeyed fragment is transparent, so keyed children survive new siblings', async () => {
+	await expectAgreement(async (scenario) => {
+		const trigger = (
+			<Fragment key="trigger">
+				<button type="button">trigger</button>
+			</Fragment>
+		);
+		await scenario.render(trigger);
+		const mounted = scenario.container.querySelector('button');
+		await scenario.render(
+			<>
+				<span key="before" />
+				{trigger}
+				<span key="after" />
+			</>,
+		);
+		scenario.log('trigger preserved', String(mounted === scenario.container.querySelector('button')));
+		scenario.snapshot('open');
+	});
+});
+
+test('a sole unkeyed fragment is transparent inside a host element too', async () => {
+	await expectAgreement(async (scenario) => {
+		await scenario.render(
+			<div>
+				<>
+					<b key="body">body</b>
+				</>
+			</div>,
+		);
+		const mounted = scenario.container.querySelector('b');
+		await scenario.render(<div>{[<i key="pad" />, <b key="body">body</b>]}</div>);
+		scenario.log('body preserved', String(mounted === scenario.container.querySelector('b')));
+		scenario.snapshot('padded');
+	});
+});
+
+test('a sole keyed fragment is a child of its own, not a transparent wrapper', async () => {
+	await expectAgreement(async (scenario) => {
+		const trigger = (
+			<Fragment key="trigger">
+				<button type="button">trigger</button>
+			</Fragment>
+		);
+		await scenario.render(<Fragment key="wrapper">{trigger}</Fragment>);
+		const mounted = scenario.container.querySelector('button');
+		await scenario.render(<>{trigger}</>);
+		scenario.log('trigger preserved', String(mounted === scenario.container.querySelector('button')));
+	});
+});
+
+test('only the outermost sole fragment dissolves', async () => {
+	await expectAgreement(async (scenario) => {
+		await scenario.render(
+			<>
+				<b key="x">x</b>
+			</>,
+		);
+		const mounted = scenario.container.querySelector('b');
+		await scenario.render(
+			<>
+				<>
+					<b key="x">x</b>
+				</>
+			</>,
+		);
+		scenario.log('x preserved', String(mounted === scenario.container.querySelector('b')));
+	});
+});
+
 test('adjacent text children merge and update in place', async () => {
 	await expectAgreement(async (scenario) => {
 		const Host = ({ name, count }: { name: string; count: number }) => (
