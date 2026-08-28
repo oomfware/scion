@@ -1,6 +1,6 @@
 {
 	"name": "@oomfware/scion",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"description": "lightweight, drop-in React 19 replacement for synchronous browser apps",
 	"license": "0BSD",
 	"repository": {
