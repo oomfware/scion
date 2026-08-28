@@ -4,8 +4,11 @@ import { expect, test } from 'vitest';
 
 import {
 	createRoot,
+	ErrorBoundary as errorBoundaryType,
 	flushSync,
 	memo as scionMemo,
+	Suspense as suspenseType,
+	use,
 	useEffect,
 	useId,
 	useMemo,
@@ -18,6 +21,8 @@ import { settleScion } from './support/harness.ts';
 
 // jsx uses React's element types in this suite.
 const memo = scionMemo as unknown as typeof react.memo;
+const ErrorBoundary = errorBoundaryType as unknown as react.ElementType;
+const Suspense = suspenseType as unknown as react.ElementType;
 
 const MEMO_CACHE_SENTINEL = Symbol.for('react.memo_cache_sentinel');
 
@@ -383,6 +388,126 @@ test('a refresh re-runs an effect whose dependencies did not change, and keeps r
 		expect(ran).toEqual(['v1', 'v2']);
 		expect(seenRef).toBe(firstRef);
 		expect(seenId).toBe(firstId);
+	} finally {
+		root.unmount();
+		container.remove();
+	}
+});
+
+test('a refresh retries an error boundary that a render-phase throw stalled', () => {
+	const id = '/render-throw.tsx';
+
+	const first = hotModule(id);
+	const Child = first.register(() => {
+		first.sign();
+		throw new Error('boom-v1');
+	}, 'Child');
+	first.sign(Child, '');
+
+	const { container, root } = mount(
+		<ErrorBoundary fallback={(error: Error) => <b>{error.message}</b>}>
+			<Child />
+		</ErrorBoundary>,
+	);
+	try {
+		expect(container.innerHTML).toBe('<b>boom-v1</b>');
+
+		{
+			const next = hotModule(id);
+			const Edited = next.register(() => {
+				next.sign();
+				return <i>child-v2</i>;
+			}, 'Child');
+			next.sign(Edited, '');
+		}
+
+		Refresh.performReactRefresh();
+
+		expect(container.innerHTML).toBe('<i>child-v2</i>');
+	} finally {
+		root.unmount();
+		container.remove();
+	}
+});
+
+test('a refresh leaves an error boundary that caught nothing alone', () => {
+	const id = '/healthy-boundary.tsx';
+	let bump: (() => void) | undefined;
+
+	const first = hotModule(id);
+	const Child = first.register(() => {
+		first.sign();
+		const [count, setCount] = useState(0);
+		bump = () => setCount(count + 1);
+		return <i>{`v1:${count}`}</i>;
+	}, 'Child');
+	first.sign(Child, 'useState{count}');
+
+	const { container, root } = mount(
+		<ErrorBoundary fallback={<b>failed</b>}>
+			<Child />
+		</ErrorBoundary>,
+	);
+	try {
+		flushSync(() => bump?.());
+		expect(container.innerHTML).toBe('<i>v1:1</i>');
+
+		{
+			const next = hotModule(id);
+			const Edited = next.register(() => {
+				next.sign();
+				const [count, setCount] = useState(0);
+				bump = () => setCount(count + 1);
+				return <i>{`v2:${count}`}</i>;
+			}, 'Child');
+			next.sign(Edited, 'useState{count}');
+		}
+
+		Refresh.performReactRefresh();
+
+		expect(container.innerHTML).toBe('<i>v2:1</i>');
+	} finally {
+		root.unmount();
+		container.remove();
+	}
+});
+
+test('a refresh retries a suspense boundary whose primary never settled', async () => {
+	const id = '/never-settles.tsx';
+	const pending = new Promise<string>(() => {});
+
+	const first = hotModule(id);
+	const Child = first.register(() => {
+		first.sign();
+		use(pending);
+		return <i>child-v1</i>;
+	}, 'Child');
+	first.sign(Child, '');
+
+	const { container, root } = mount(
+		<section>
+			<Suspense fallback={<b>loading</b>}>
+				<Child />
+			</Suspense>
+		</section>,
+	);
+	try {
+		await settleScion();
+		expect(container.innerHTML).toBe('<section><b>loading</b></section>');
+
+		{
+			const next = hotModule(id);
+			const Edited = next.register(() => {
+				next.sign();
+				return <i>child-v2</i>;
+			}, 'Child');
+			next.sign(Edited, '');
+		}
+
+		Refresh.performReactRefresh();
+		await settleScion();
+
+		expect(container.innerHTML).toBe('<section><i>child-v2</i></section>');
 	} finally {
 		root.unmount();
 		container.remove();

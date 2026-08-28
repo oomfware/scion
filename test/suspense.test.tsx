@@ -3,6 +3,7 @@ import { expect, test } from 'vitest';
 
 import { expectAgreement, runBoth } from './support/differential.ts';
 import type { Scenario } from './support/harness.ts';
+import { runScenario, scionRuntime } from './support/harness.ts';
 import { Suspense, lazy, memo, use, useEffect, useState } from './support/runtime.ts';
 
 // #region agreement — showing the fallback
@@ -231,6 +232,40 @@ test('scion unmounts a subtree that suspends after mounting', async () => {
 	const { react, scion } = await runBoth(scenario);
 	expect(scion.entries).toEqual(['content mounted', '--- suspend ---', 'content unmounted']);
 	expect(react.entries).toEqual(['content mounted', '--- suspend ---']);
+});
+
+test('scion subscribes to a stalled thenable once, however often the boundary re-renders', async () => {
+	let subscriptions = 0;
+	const pending = {
+		// oxlint-disable-next-line unicorn/no-thenable -- test thenable
+		then: () => {
+			subscriptions++;
+		},
+	} as unknown as PromiseLike<string>;
+	let afterFirstSuspend = 0;
+
+	await runScenario(scionRuntime, async (scenario) => {
+		const Content = () => <i>{use(pending)}</i>;
+		const Host = ({ label }: { label: string }) => (
+			<div>
+				<span>{label}</span>
+				<Suspense fallback={<b>loading</b>}>
+					<Content />
+				</Suspense>
+			</div>
+		);
+
+		await scenario.render(<Host label="a" />);
+		expect(scenario.html()).toBe('<div><span>a</span><b>loading</b></div>');
+		afterFirstSuspend = subscriptions;
+
+		for (const label of ['b', 'c', 'd']) {
+			await scenario.render(<Host label={label} />);
+		}
+		expect(scenario.html()).toBe('<div><span>d</span><b>loading</b></div>');
+	});
+
+	expect(subscriptions).toBe(afterFirstSuspend);
 });
 
 // #endregion

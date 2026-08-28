@@ -198,6 +198,7 @@ interface FiberBase<
 	hooks: Hook | null;
 
 	caughtError: { value: unknown } | undefined;
+	pendingThenable: PromiseLike<unknown> | undefined;
 	portalEnd: Comment | undefined;
 	portalStart: Comment | undefined;
 	refCleanup: (() => void) | undefined;
@@ -365,6 +366,7 @@ const createFiberNode = <Kind extends FiberKind, NodeType extends HostElement | 
 		kind,
 		node,
 		parent,
+		pendingThenable: undefined,
 		portalEnd: undefined,
 		portalStart: undefined,
 		props: EMPTY_PROPS,
@@ -2125,7 +2127,16 @@ const describeFiber = (fiber: Fiber): string => {
 };
 
 const retryWhenSettled = (fiber: Fiber, thenable: PromiseLike<unknown>) => {
+	// avoid retaining duplicate reactions to a thenable that may never settle.
+	if (fiber.pendingThenable === thenable) {
+		return;
+	}
+
+	fiber.pendingThenable = thenable;
+
 	const retry = () => {
+		fiber.pendingThenable = undefined;
+
 		if (isUnmounted(fiber)) {
 			return;
 		}
@@ -3424,6 +3435,34 @@ const remountFiber = (fiber: Fiber) => {
 	markForceUpdate(fiber);
 };
 
+// refresh cannot match families in an unmounted primary subtree.
+const retryStalledBoundary = (fiber: Fiber): boolean => {
+	switch (fiber.kind) {
+		case FiberKind.ErrorBoundary: {
+			if (!fiber.caughtError) {
+				break;
+			}
+
+			fiber.caughtError = undefined;
+			// discard the fallback in case it was edited.
+			remountFiber(fiber);
+			return true;
+		}
+		case FiberKind.Suspense: {
+			// ForceUpdate remains set while the fallback is mounted.
+			if ((fiber.flags & FiberFlag.ForceUpdate) === 0) {
+				break;
+			}
+
+			// restore the dirty path without discarding the fallback.
+			markDirtyPath(fiber);
+			break;
+		}
+	}
+
+	return false;
+};
+
 const enum RefreshVerdict {
 	None,
 	Update,
@@ -3462,6 +3501,10 @@ const refreshVerdict = (fiber: Fiber, update: RefreshUpdate): RefreshVerdict => 
 
 const markRefreshWork = (fibers: Fiber[], update: RefreshUpdate) => {
 	for (const fiber of fibers) {
+		if (retryStalledBoundary(fiber)) {
+			continue;
+		}
+
 		const verdict = refreshVerdict(fiber, update);
 
 		switch (verdict) {
