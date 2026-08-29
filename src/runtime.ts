@@ -1163,17 +1163,25 @@ const renderRootWork = (root: Root, full: boolean) => {
 		const hook = DEV ? getDevtoolsHook() : undefined;
 		hook?.onScheduleFiberRoot?.(root.id, root, root.element);
 		let failed = false;
-		if (full) {
-			const pending = root.dirty;
-			root.dirty = [];
-			for (const fiber of pending) {
-				fiber.flags &= ~FiberFlag.Queued;
-				// a pass that ran since this fiber was queued may have cleared the path to it.
-				if (consumeFiberUpdate(fiber)) {
-					markDirtyPath(fiber);
-				}
-			}
 
+		const targets = root.dirty;
+		root.dirty = [];
+		let targetCount = 0;
+		for (const fiber of targets) {
+			fiber.flags &= ~FiberFlag.Queued;
+			// another pass may have consumed the update.
+			if (!consumeFiberUpdate(fiber)) {
+				continue;
+			}
+			if (full) {
+				markDirtyPath(fiber);
+			} else {
+				targets[targetCount++] = fiber;
+			}
+		}
+		targets.length = targetCount;
+
+		if (full) {
 			try {
 				root.fibers = reconcileChildren(null, root.fibers, root.element, root.container, null, root);
 			} catch (error) {
@@ -1182,18 +1190,6 @@ const renderRootWork = (root: Root, full: boolean) => {
 				console.error(error);
 			}
 		} else {
-			const targets = root.dirty;
-			root.dirty = [];
-			let targetCount = 0;
-			for (const fiber of targets) {
-				fiber.flags &= ~FiberFlag.Queued;
-				if (consumeFiberUpdate(fiber)) {
-					targets[targetCount++] = fiber;
-				}
-			}
-
-			targets.length = targetCount;
-
 			// shallowest first, so an ancestor's render reaches its dirty descendants itself.
 			if (targetCount > 1) {
 				targets.sort(byDepth);
