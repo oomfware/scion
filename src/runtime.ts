@@ -21,7 +21,6 @@ const enum CommitQueue {
 	RefAttach,
 	AutoFocus,
 	PassiveCleanup,
-	Count,
 }
 
 const enum HookKind {
@@ -307,7 +306,6 @@ let dirtyRoots: Root[] = [];
 const roots = new Set<Root>();
 
 const EMPTY_CHILDREN: Fiber[] = [];
-const EMPTY_MATCHES: (Fiber | undefined)[] = [];
 const EMPTY_PROPS: Props = {};
 
 const childBuffers: Array<Array<Child | boolean | null>> = [];
@@ -746,7 +744,7 @@ export const useRef = <Value>(initial?: Value): { current: Value | undefined } =
 	return hook.value;
 };
 
-const newMemoCache = (size: number): unknown[] => Array.from({ length: size }, () => MEMO_CACHE_SENTINEL);
+const newMemoCache = (size: number): unknown[] => Array(size).fill(MEMO_CACHE_SENTINEL);
 
 export const useMemoCache = (size: number): unknown[] => {
 	let hook = nextHook(HookKind.MemoCache);
@@ -1002,7 +1000,7 @@ export const createRoot = (
 				return;
 			}
 			root.element = element;
-			renderRoot(root);
+			renderRootWork(root, true);
 		},
 		unmount() {
 			if (root.disposed) {
@@ -1089,13 +1087,9 @@ const scheduleRootWork = (root: Root, fiber: Fiber) => {
 
 const renderPass = (root: Root) => {
 	root.scheduled = false;
-	if (root.fullRender) {
-		root.fullRender = false;
-		// renderRoot consumes the queue; discarding it would drop those updates.
-		renderRoot(root);
-	} else {
-		renderDirtyFibers(root);
-	}
+	const full = root.fullRender;
+	root.fullRender = false;
+	renderRootWork(root, full);
 };
 
 const flushRoots = () => {
@@ -1133,7 +1127,7 @@ const drainCascade = (root: Root) => {
 	}
 };
 
-const newCommitQueues = (): Array<Array<() => void>> => Array.from({ length: CommitQueue.Count }, () => []);
+const newCommitQueues = (): Array<Array<() => void>> => [[], [], [], [], [], [], []];
 
 // every commit drains its queues, so the next pass always starts from empty ones.
 const runQueue = (queue: Array<() => void>) => {
@@ -1143,141 +1137,113 @@ const runQueue = (queue: Array<() => void>) => {
 	queue.length = 0;
 };
 
-const beginRenderPass = (root: Root): Root | null => {
-	root.effects = null;
-	root.effectsTail = null;
-	const previous = renderingRoot;
-	renderingRoot = root;
-	return previous;
-};
-
-const renderRoot = (root: Root) => {
-	if (!beginRender(root)) {
-		return;
-	}
-	const previousRoot = beginRenderPass(root);
-	try {
-		const pending = root.dirty;
-		root.dirty = [];
-		for (const fiber of pending) {
-			fiber.flags &= ~FiberFlag.Queued;
-			// a pass that ran since this fiber was queued may have cleared the path to it.
-			if (consumeFiberUpdate(fiber)) {
-				markDirtyPath(fiber);
-			}
-		}
-		const hook = DEV ? getDevtoolsHook() : undefined;
-		hook?.onScheduleFiberRoot?.(root.id, root, root.element);
-
-		let failed = false;
-		try {
-			root.fibers = reconcileChildren(null, root.fibers, root.element, root.container, null, root);
-		} catch (error) {
-			failed = true;
-			root.onUncaughtError?.(error);
-			console.error(error);
-		}
-
-		commitRoot(root, failed);
-	} finally {
-		renderingRoot = previousRoot;
-	}
-
-	drainCascade(root);
-};
-
 // match React's nested update limit.
 const CASCADE_LIMIT = 50;
 
-const beginRender = (root: Root): boolean => {
+const renderRootWork = (root: Root, full: boolean) => {
 	// external renders start a new cascade.
 	root.cascadeDepth = root.cascadeScheduled ? root.cascadeDepth + 1 : 0;
 	root.cascadeScheduled = false;
-	if (root.cascadeDepth <= CASCADE_LIMIT) {
-		return true;
-	}
-	root.scheduled = false;
-	if (DEV) {
-		console.error('scion stopped an update loop.', root.scheduleReason);
-	}
-
-	return false;
-};
-
-const renderDirtyFibers = (root: Root) => {
-	if (!beginRender(root)) {
-		discardDirtyFibers(root);
+	if (root.cascadeDepth > CASCADE_LIMIT) {
+		root.scheduled = false;
+		if (DEV) {
+			console.error('scion stopped an update loop.', root.scheduleReason);
+		}
+		if (!full) {
+			discardDirtyFibers(root);
+		}
 		return;
 	}
-	const previousRoot = beginRenderPass(root);
 
+	root.effects = null;
+	root.effectsTail = null;
+	const previousRoot = renderingRoot;
+	renderingRoot = root;
 	try {
 		const hook = DEV ? getDevtoolsHook() : undefined;
 		hook?.onScheduleFiberRoot?.(root.id, root, root.element);
 		let failed = false;
-		const targets = root.dirty;
-		root.dirty = [];
-		let targetCount = 0;
-		for (const fiber of targets) {
-			fiber.flags &= ~FiberFlag.Queued;
-			if (consumeFiberUpdate(fiber)) {
-				targets[targetCount++] = fiber;
+		if (full) {
+			const pending = root.dirty;
+			root.dirty = [];
+			for (const fiber of pending) {
+				fiber.flags &= ~FiberFlag.Queued;
+				// a pass that ran since this fiber was queued may have cleared the path to it.
+				if (consumeFiberUpdate(fiber)) {
+					markDirtyPath(fiber);
+				}
 			}
-		}
-
-		targets.length = targetCount;
-
-		// shallowest first, so an ancestor's render reaches its dirty descendants itself.
-		if (targetCount > 1) {
-			targets.sort(byDepth);
-		}
-
-		for (const fiber of targets) {
-			// skip fibers an earlier target already rendered, and those it removed.
-			if ((fiber.flags & FiberFlag.ForceUpdate) === 0 || isUnmounted(fiber)) {
-				continue;
-			}
-
-			fiber.flags &= ~FiberFlag.ForceUpdate;
 
 			try {
-				rerenderFiber(fiber);
+				root.fibers = reconcileChildren(null, root.fibers, root.element, root.container, null, root);
 			} catch (error) {
-				const boundary = findUpdateBoundary(fiber, error);
-				if (boundary) {
-					rerenderFiber(boundary);
-				} else {
-					failed = true;
-					root.onUncaughtError?.(error);
-					console.error(error);
+				failed = true;
+				root.onUncaughtError?.(error);
+				console.error(error);
+			}
+		} else {
+			const targets = root.dirty;
+			root.dirty = [];
+			let targetCount = 0;
+			for (const fiber of targets) {
+				fiber.flags &= ~FiberFlag.Queued;
+				if (consumeFiberUpdate(fiber)) {
+					targets[targetCount++] = fiber;
+				}
+			}
+
+			targets.length = targetCount;
+
+			// shallowest first, so an ancestor's render reaches its dirty descendants itself.
+			if (targetCount > 1) {
+				targets.sort(byDepth);
+			}
+
+			for (const fiber of targets) {
+				// skip fibers an earlier target already rendered, and those it removed.
+				if ((fiber.flags & FiberFlag.ForceUpdate) === 0 || isUnmounted(fiber)) {
+					continue;
+				}
+
+				fiber.flags &= ~FiberFlag.ForceUpdate;
+
+				try {
+					rerenderFiber(fiber);
+				} catch (error) {
+					const boundary = findUpdateBoundary(fiber, error);
+					if (boundary) {
+						rerenderFiber(boundary);
+					} else {
+						failed = true;
+						root.onUncaughtError?.(error);
+						console.error(error);
+					}
 				}
 			}
 		}
 
-		commitRoot(root, failed);
+		{
+			const commitHook = DEV ? getDevtoolsHook() : undefined;
+			commitHook?.onCommitFiberRoot?.(root.id, root, null, failed);
+			const queues = root.queues;
+			runQueue(queues[CommitQueue.LayoutCleanup]);
+			runEffects(root.effects, EffectKind.Insertion);
+			runQueue(queues[CommitQueue.RefDetach]);
+			runQueue(queues[CommitQueue.Removal]);
+			// a hidden render can add visible nodes, so hide them after DOM changes settle.
+			for (const activity of root.hidden) {
+				hideChildren(activity);
+			}
+			runQueue(queues[CommitQueue.RefAttach]);
+			runQueue(queues[CommitQueue.AutoFocus]);
+			runEffects(root.effects, EffectKind.Layout);
+			flushPassiveEffects(root, synchronousEffects > 0);
+		}
 	} finally {
 		renderingRoot = previousRoot;
 	}
 
 	drainCascade(root);
-};
-
-const commitRoot = (root: Root, failed: boolean) => {
-	const hook = DEV ? getDevtoolsHook() : undefined;
-	hook?.onCommitFiberRoot?.(root.id, root, null, failed);
-	const queues = root.queues;
-	runQueue(queues[CommitQueue.LayoutCleanup]);
-	runEffects(root.effects, EffectKind.Insertion);
-	runQueue(queues[CommitQueue.RefDetach]);
-	runQueue(queues[CommitQueue.Removal]);
-	// a hidden render can add visible nodes, so hide them after DOM changes settle.
-	for (const activity of root.hidden) {
-		hideChildren(activity);
-	}
-	runQueue(queues[CommitQueue.RefAttach]);
-	runQueue(queues[CommitQueue.AutoFocus]);
-	runEffects(root.effects, EffectKind.Layout);
-	flushPassiveEffects(root, synchronousEffects > 0);
 };
 
 // #endregion
@@ -1437,30 +1403,6 @@ const markMovedChildren = (matches: Array<Fiber | undefined>): Int32Array => {
 	return runs;
 };
 
-// elements, text, and holes reconcile in place; anything else has to be flattened first.
-const directChildArray = (children: any): Array<Child | boolean | null> | null => {
-	if (!Array.isArray(children)) {
-		return null;
-	}
-
-	for (const child of children) {
-		switch (typeof child) {
-			case 'object': {
-				if (child !== null && child.$$typeof !== ELEMENT) {
-					return null;
-				}
-				break;
-			}
-			case 'bigint':
-			case 'number': {
-				return null;
-			}
-		}
-	}
-
-	return children;
-};
-
 const unwrapSoleFragment = (children: any): any => {
 	if (isValidElement(children) && children.type === FRAGMENT && children.key === null) {
 		return children.props.children;
@@ -1521,12 +1463,8 @@ const reconcileChildren = (
 ): Fiber[] => {
 	const unwrapped = unwrapSoleFragment(children);
 
-	// flat JSX arrays can feed the diff without a copy.
-	const directValues = directChildArray(unwrapped);
-	const values = directValues ?? (childBuffers[reconcileDepth] ??= []);
-	if (directValues === null) {
-		flattenChildrenInto(unwrapped, values);
-	}
+	const values = (childBuffers[reconcileDepth] ??= []);
+	flattenChildrenInto(unwrapped, values);
 
 	reconcileDepth++;
 
@@ -1534,7 +1472,7 @@ const reconcileChildren = (
 
 	let next: Fiber[] | null = null;
 	let mounted: Fiber[] | null = null;
-	let matches = EMPTY_MATCHES;
+	let matches: Array<Fiber | undefined> = EMPTY_CHILDREN;
 	let moves: Int32Array | null = null;
 	let detached: Array<Node | null> | null = null;
 
@@ -1596,10 +1534,7 @@ const reconcileChildren = (
 
 		throw error;
 	} finally {
-		if (directValues === null) {
-			values.length = 0;
-		}
-
+		values.length = 0;
 		reconcileDepth--;
 	}
 
@@ -1712,21 +1647,11 @@ const nextChildNode = (children: Fiber[], start: number, end: Node | null): Node
 	return end;
 };
 
-const passesToChildren = (fiber: Fiber): boolean => {
-	switch (fiber.kind) {
-		case FiberKind.Component:
-		case FiberKind.Fragment:
-		case FiberKind.Host:
-		case FiberKind.Provider: {
-			return true;
-		}
-		default: {
-			return false;
-		}
-	}
-};
-
 const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Node | null) => {
+	if ((fiber.flags & FiberFlag.SubtreeDirty) === 0) {
+		return;
+	}
+
 	const context = fiber.kind === FiberKind.Provider ? providerContext(fiber.type) : null;
 
 	let previousValue: any;
@@ -1755,7 +1680,13 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 			const previousFirstHost = child.firstHost;
 			const anchor = nextChildNode(children, index + 1, childEnd);
 
-			if ((child.flags & FiberFlag.ForceUpdate) === 0 && passesToChildren(child)) {
+			if (
+				(child.flags & FiberFlag.ForceUpdate) === 0 &&
+				(child.kind === FiberKind.Component ||
+					child.kind === FiberKind.Fragment ||
+					child.kind === FiberKind.Host ||
+					child.kind === FiberKind.Provider)
+			) {
 				updateDirtyChildren(child, childContainer, anchor);
 			} else {
 				updateFiber(child, selfVNode(child), childContainer, anchor, UpdateFiber.Forced);
@@ -1808,9 +1739,7 @@ const updateFiber = (
 	const vnode = value;
 
 	if (fiber.props === vnode.props && !forced && (fiber.flags & FiberFlag.ForceUpdate) === 0) {
-		if (!subtreeUnchanged(fiber)) {
-			updateDirtyChildren(fiber, container, before);
-		}
+		updateDirtyChildren(fiber, container, before);
 		return;
 	}
 
@@ -1826,9 +1755,7 @@ const updateFiber = (
 		switch (fiber.kind) {
 			case FiberKind.Host: {
 				if (!mounting && shallowEqual(previousProps, vnode.props)) {
-					if (!subtreeUnchanged(fiber)) {
-						updateDirtyChildren(fiber, container, before);
-					}
+					updateDirtyChildren(fiber, container, before);
 					break;
 				}
 
@@ -1872,7 +1799,7 @@ const updateFiber = (
 					!isDeactivated(fiber)
 				) {
 					queueRefDetach(fiber);
-					queueRefAttach(fiber, { ref: nextRef, value: element });
+					queueRefAttach(fiber, nextRef, element);
 				}
 
 				break;
@@ -2010,9 +1937,7 @@ const updateFiber = (
 					(fiber.flags & FiberFlag.ForceUpdate) === 0 &&
 					(fiber.type.compare ?? shallowEqual)(previousProps, vnode.props)
 				) {
-					if (!subtreeUnchanged(fiber)) {
-						updateDirtyChildren(fiber, container, before);
-					}
+					updateDirtyChildren(fiber, container, before);
 
 					break;
 				}
@@ -2192,31 +2117,53 @@ const findUpdateBoundary = (fiber: Fiber, error: unknown): Fiber | undefined => 
 	return undefined;
 };
 
-const hostContainerOf = (fiber: Fiber): HostContainer => {
-	let parent = fiber.parent;
-	while (parent) {
-		switch (parent.kind) {
-			case FiberKind.Host: {
-				return parent.node;
-			}
-			case FiberKind.Portal: {
-				return parent.props.container;
-			}
-		}
-		parent = parent.parent;
-	}
-	return fiber.root.container;
-};
-
 const rerenderFiber = (fiber: Fiber) => {
 	const previousFirstHost = fiber.firstHost;
-	const container = hostContainerOf(fiber);
+	let container: HostContainer | undefined;
+	let providers: Fiber[] | undefined;
+	for (let parent = fiber.parent; parent !== null; parent = parent.parent) {
+		switch (parent.kind) {
+			case FiberKind.Host: {
+				container ??= parent.node;
+				break;
+			}
+			case FiberKind.Portal: {
+				container ??= parent.props.container;
+				break;
+			}
+			case FiberKind.Provider: {
+				(providers ??= []).push(parent);
+				break;
+			}
+		}
+	}
+	container ??= fiber.root.container;
+
+	let previousValues: any[] | undefined;
+	let previousProviders: Array<Fiber | null> | undefined;
+	if (providers) {
+		previousValues = Array(providers.length);
+		previousProviders = Array(providers.length);
+		for (let index = providers.length - 1; index >= 0; index--) {
+			const provider = providers[index];
+			const context = providerContext(provider.type);
+			previousValues[index] = context.currentValue;
+			previousProviders[index] = context.currentProvider;
+			context.currentValue = provider.props.value;
+			context.currentProvider = provider;
+		}
+	}
 
 	try {
-		withFiberContext(fiber, () => {
-			updateFiber(fiber, selfVNode(fiber), container, nextNode(fiber), UpdateFiber.Forced);
-		});
+		updateFiber(fiber, selfVNode(fiber), container, nextNode(fiber), UpdateFiber.Forced);
 	} finally {
+		if (providers) {
+			for (let index = 0; index < providers.length; index++) {
+				const context = providerContext(providers[index].type);
+				context.currentValue = previousValues![index];
+				context.currentProvider = previousProviders![index];
+			}
+		}
 		if (fiber.firstHost !== previousFirstHost) {
 			refreshAncestorFirstHosts(fiber);
 		}
@@ -2244,43 +2191,6 @@ const consumeFiberUpdate = (fiber: Fiber): boolean => {
 	}
 	fiber.flags = changed ? fiber.flags | FiberFlag.ForceUpdate : fiber.flags & ~FiberFlag.ForceUpdate;
 	return changed;
-};
-
-// scheduling marks the path to every fiber that needs work, so this is a flag test.
-const subtreeUnchanged = (fiber: Fiber): boolean => (fiber.flags & FiberFlag.SubtreeDirty) === 0;
-
-const withFiberContext = <Value>(fiber: Fiber, callback: () => Value): Value => {
-	let providers: Fiber[] | null = null;
-	for (let parent = fiber.parent; parent !== null; parent = parent.parent) {
-		if (parent.kind === FiberKind.Provider) {
-			(providers ??= []).push(parent);
-		}
-	}
-
-	if (providers === null) {
-		return callback();
-	}
-
-	const previousValues = Array(providers.length);
-	const previousProviders = Array(providers.length);
-	for (let index = providers.length - 1; index >= 0; index--) {
-		const provider = providers[index];
-		const context = providerContext(provider.type);
-		previousValues[index] = context.currentValue;
-		previousProviders[index] = context.currentProvider;
-		context.currentValue = provider.props.value;
-		context.currentProvider = provider;
-	}
-
-	try {
-		return callback();
-	} finally {
-		for (let index = 0; index < providers.length; index++) {
-			const context = providerContext(providers[index].type);
-			context.currentValue = previousValues[index];
-			context.currentProvider = previousProviders[index];
-		}
-	}
 };
 
 const compatible = (fiber: Fiber, value: Child): boolean => {
@@ -2496,7 +2406,7 @@ const queueRefDetach = (fiber: Fiber) => {
 	}
 };
 
-const queueRefAttach = (fiber: Fiber, { ref, value }: { ref: any; value: any }) => {
+const queueRefAttach = (fiber: Fiber, ref: any, value: any) => {
 	fiber.root.queues[CommitQueue.RefAttach].push(() => {
 		fiber.refCleanup = setRef(ref, value);
 	});
@@ -2575,7 +2485,7 @@ const reactivateFiber = (fiber: Fiber) => {
 		}
 	}
 	if (fiber.kind === FiberKind.Host && fiber.props.ref) {
-		queueRefAttach(fiber, { ref: fiber.props.ref, value: fiber.node });
+		queueRefAttach(fiber, fiber.props.ref, fiber.node);
 	}
 };
 
@@ -2861,13 +2771,6 @@ const hyphenatedAttributes = new Set([
 	'writingMode',
 ]);
 
-const attributeName = (name: string): string => {
-	if (!hyphenatedAttributes.has(name)) {
-		return name;
-	}
-	return name.replace(/[A-Z]/g, (character) => `-${character.toLowerCase()}`);
-};
-
 const attributeNamespaces: Record<string, string> = {
 	xlink: 'http://www.w3.org/1999/xlink',
 	xml: 'http://www.w3.org/XML/1998/namespace',
@@ -2877,12 +2780,8 @@ const attributeNamespaces: Record<string, string> = {
 // react spells a namespaced attribute as its prefix followed by the local name
 const namespacedAttribute = /^(xmlns|xlink|xml)([A-Z]\w*)$/;
 
-const namespaceOf = (name: string): RegExpExecArray | null => {
-	return name.charCodeAt(0) === 120 ? namespacedAttribute.exec(name) : null;
-};
-
 const writeAttribute = (element: HostElement, name: string, value: string | null) => {
-	const namespaced = namespaceOf(name);
+	const namespaced = name.charCodeAt(0) === 120 ? namespacedAttribute.exec(name) : null;
 	if (namespaced) {
 		const namespace = attributeNamespaces[namespaced[1]];
 		const local = namespaced[2].toLowerCase();
@@ -2896,7 +2795,9 @@ const writeAttribute = (element: HostElement, name: string, value: string | null
 		return;
 	}
 
-	const attribute = attributeName(name);
+	const attribute = hyphenatedAttributes.has(name)
+		? name.replace(/[A-Z]/g, (character) => `-${character.toLowerCase()}`)
+		: name;
 	if (value === null) {
 		element.removeAttribute(attribute);
 	} else {
@@ -2972,14 +2873,9 @@ const setStyle = (
 
 const eventNames: Record<string, string> = {
 	Blur: 'focusout',
+	Change: 'input',
 	DoubleClick: 'dblclick',
 	Focus: 'focusin',
-	GotPointerCapture: 'gotpointercapture',
-	LostPointerCapture: 'lostpointercapture',
-	MouseEnter: 'mouseenter',
-	MouseLeave: 'mouseleave',
-	PointerEnter: 'pointerenter',
-	PointerLeave: 'pointerleave',
 };
 
 const handlerKey = (name: string, capture: boolean): `__scion$${string}` => {
@@ -3019,7 +2915,7 @@ const eventProxyCapture = createEventProxy(true);
 const setEvent = (element: HostElement, prop: string, handler: any, fiber: Fiber) => {
 	const capture = prop.endsWith('Capture');
 	const reactName = prop.slice(2, capture ? -7 : undefined);
-	const name = eventNames[reactName] ?? (reactName === 'Change' ? 'input' : reactName.toLowerCase());
+	const name = eventNames[reactName] ?? reactName.toLowerCase();
 	const key = handlerKey(name, capture);
 	const proxy = capture ? eventProxyCapture : eventProxy;
 
@@ -3398,11 +3294,11 @@ const installRefreshBridge = (): boolean => {
 		rendererPackageName: 'scion',
 		scheduleRefresh(root: Root, update: RefreshUpdate) {
 			markRefreshWork(root.fibers, update);
-			renderRoot(root);
+			renderRootWork(root, true);
 		},
 		scheduleRoot(root: Root, element: any) {
 			root.element = element;
-			renderRoot(root);
+			renderRootWork(root, true);
 		},
 		setRefreshHandler(resolve: typeof familyResolver) {
 			familyResolver = resolve;
