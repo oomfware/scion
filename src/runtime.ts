@@ -1620,16 +1620,7 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 		return;
 	}
 
-	const context = fiber.kind === FiberKind.Provider ? providerContext(fiber.type) : null;
-
-	let previousValue: any;
-	let previousProvider: Fiber | null = null;
-	if (context) {
-		previousValue = context.currentValue;
-		previousProvider = context.currentProvider;
-		context.currentValue = fiber.props.value;
-		context.currentProvider = fiber;
-	}
+	const mark = fiber.kind === FiberKind.Provider ? pushProvider(fiber) : -1;
 
 	const children = fiber.children;
 	const element = fiber.kind === FiberKind.Host ? fiber.node : null;
@@ -1670,9 +1661,8 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 		refreshFirstHost(fiber);
 		throw error;
 	} finally {
-		if (context) {
-			context.currentValue = previousValue;
-			context.currentProvider = previousProvider;
+		if (mark >= 0) {
+			popProviders(mark);
 		}
 	}
 
@@ -1813,12 +1803,7 @@ const updateFiber = (
 				break;
 			}
 			case FiberKind.Provider: {
-				const context = providerContext(fiber.type);
-				const previousValue = context.currentValue;
-				const previousProvider = context.currentProvider;
-
-				context.currentValue = vnode.props.value;
-				context.currentProvider = fiber;
+				const mark = pushProvider(fiber);
 
 				if (!mounting && !Object.is(previousProps.value, vnode.props.value)) {
 					notifyConsumers(fiber);
@@ -1827,8 +1812,7 @@ const updateFiber = (
 				try {
 					fiber.children = reconcileInnerChildren(fiber, vnode.props.children, container, before);
 				} finally {
-					context.currentValue = previousValue;
-					context.currentProvider = previousProvider;
+					popProviders(mark);
 				}
 
 				break;
@@ -2107,31 +2091,18 @@ const rerenderFiber = (fiber: Fiber) => {
 	}
 	container ??= fiber.root.container;
 
-	let previousValues: any[] | undefined;
-	let previousProviders: Array<Fiber | null> | undefined;
+	// apply provider context outermost first.
+	const mark = providerStack.length;
 	if (providers) {
-		previousValues = Array(providers.length);
-		previousProviders = Array(providers.length);
 		for (let index = providers.length - 1; index >= 0; index--) {
-			const provider = providers[index];
-			const context = providerContext(provider.type);
-			previousValues[index] = context.currentValue;
-			previousProviders[index] = context.currentProvider;
-			context.currentValue = provider.props.value;
-			context.currentProvider = provider;
+			pushProvider(providers[index]);
 		}
 	}
 
 	try {
 		updateFiber(fiber, selfVNode(fiber), container, nextNode(fiber), UpdateFiber.Forced);
 	} finally {
-		if (providers) {
-			for (let index = 0; index < providers.length; index++) {
-				const context = providerContext(providers[index].type);
-				context.currentValue = previousValues![index];
-				context.currentProvider = previousProviders![index];
-			}
-		}
+		popProviders(mark);
 		if (fiber.firstHost !== previousFirstHost) {
 			refreshAncestorFirstHosts(fiber);
 		}
@@ -2223,6 +2194,28 @@ const resolveType = (type: any): any => (DEV ? (familyResolver?.(type)?.current 
 
 const providerContext = (type: any): Context<any> => {
 	return type.$$typeof === CONTEXT ? type : type._context;
+};
+
+// flat context/value/provider frames avoid per-provider allocations.
+const providerStack: any[] = [];
+
+const pushProvider = (fiber: Fiber): number => {
+	const context = providerContext(fiber.type);
+	const mark = providerStack.length;
+	providerStack.push(context, context.currentValue, context.currentProvider);
+	context.currentValue = fiber.props.value;
+	context.currentProvider = fiber;
+
+	return mark;
+};
+
+const popProviders = (mark: number) => {
+	for (let index = providerStack.length - 3; index >= mark; index -= 3) {
+		const context: Context<any> = providerStack[index];
+		context.currentValue = providerStack[index + 1];
+		context.currentProvider = providerStack[index + 2];
+	}
+	providerStack.length = mark;
 };
 
 const createFiber = (
