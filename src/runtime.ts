@@ -1274,22 +1274,17 @@ const matchesInOrder = (candidate: Fiber | undefined, value: Child, key: Key, in
 	(key !== null || candidate.index === index) &&
 	compatible(candidate, value);
 
-// a repeated key keeps only its last fiber in the index, as React does; the rest remount.
-const matchByKey = (
+// build the key index only after the in-order scan misses.
+const matchChildren = (
 	previous: Fiber[],
 	values: Array<Child | boolean | null>,
 	matches: Array<Fiber | undefined>,
-	start: number,
-	scanStart: number,
 	pass: number,
-) => {
-	const byKey = new Map<number | string, Fiber>();
-	for (const fiber of previous) {
-		byKey.set(fiber.key ?? fiber.index, fiber);
-	}
+): boolean => {
+	let byKey: Map<number | string, Fiber> | null = null;
+	let scan = 0;
 
-	let scan = scanStart;
-	for (let index = start; index < values.length; index++) {
+	for (let index = 0; index < values.length; index++) {
 		const value = values[index];
 
 		if (!isRenderableChild(value)) {
@@ -1304,7 +1299,17 @@ const matchByKey = (
 
 		if (matchesInOrder(match, value, key, index)) {
 			scan++;
+		} else if (match === undefined && byKey === null) {
+			matches.push(undefined);
+			continue;
 		} else {
+			if (byKey === null) {
+				byKey = new Map();
+				for (const fiber of previous) {
+					byKey.set(fiber.key ?? fiber.index, fiber);
+				}
+			}
+
 			const indexed = byKey.get(key ?? index);
 			if (indexed === undefined || indexed.pass === pass || !compatible(indexed, value)) {
 				matches.push(undefined);
@@ -1317,45 +1322,8 @@ const matchByKey = (
 		match.pass = pass;
 		matches.push(match);
 	}
-};
 
-// returns whether matching left source order.
-const matchChildren = (
-	previous: Fiber[],
-	values: Array<Child | boolean | null>,
-	matches: Array<Fiber | undefined>,
-	pass: number,
-): boolean => {
-	let scan = 0;
-
-	for (let index = 0; index < values.length; index++) {
-		const value = values[index];
-
-		if (!isRenderableChild(value)) {
-			matches.push(undefined);
-			continue;
-		}
-
-		scan = skipClaimed(previous, scan, pass);
-		const candidate = previous[scan];
-
-		if (matchesInOrder(candidate, value, childKeyOf(value), index)) {
-			candidate.pass = pass;
-			matches.push(candidate);
-			scan++;
-			continue;
-		}
-
-		if (candidate === undefined) {
-			matches.push(undefined);
-			continue;
-		}
-
-		matchByKey(previous, values, matches, index, scan, pass);
-		return true;
-	}
-
-	return false;
+	return byKey !== null;
 };
 
 // marks children outside the longest increasing slot subsequence.
