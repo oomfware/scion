@@ -1367,6 +1367,30 @@ const markMovedChildren = (matches: Array<Fiber | undefined>): Int32Array => {
 	return runs;
 };
 
+// elements, text, and holes reconcile in place; anything else has to be flattened first.
+const directChildArray = (children: any): Array<Child | boolean | null> | null => {
+	if (!Array.isArray(children)) {
+		return null;
+	}
+
+	for (const child of children) {
+		switch (typeof child) {
+			case 'object': {
+				if (child !== null && child.$$typeof !== ELEMENT) {
+					return null;
+				}
+				break;
+			}
+			case 'bigint':
+			case 'number': {
+				return null;
+			}
+		}
+	}
+
+	return children;
+};
+
 const unwrapSoleFragment = (children: any): any => {
 	if (isValidElement(children) && children.type === FRAGMENT && children.key === null) {
 		return children.props.children;
@@ -1427,8 +1451,12 @@ const reconcileChildren = (
 ): Fiber[] => {
 	const unwrapped = unwrapSoleFragment(children);
 
-	const values = (childBuffers[reconcileDepth] ??= []);
-	flattenChildrenInto(unwrapped, values);
+	// flat JSX arrays can feed the diff without a copy.
+	const directValues = directChildArray(unwrapped);
+	const values = directValues ?? (childBuffers[reconcileDepth] ??= []);
+	if (directValues === null) {
+		flattenChildrenInto(unwrapped, values);
+	}
 
 	reconcileDepth++;
 
@@ -1498,7 +1526,9 @@ const reconcileChildren = (
 
 		throw error;
 	} finally {
-		values.length = 0;
+		if (directValues === null) {
+			values.length = 0;
+		}
 		reconcileDepth--;
 	}
 
@@ -1600,6 +1630,8 @@ const updateSoleText = (fiber: HostFiber, value: string): boolean => {
 	return true;
 };
 
+const subtreeUnchanged = (fiber: Fiber): boolean => (fiber.flags & FiberFlag.SubtreeDirty) === 0;
+
 // the anchor for a dirty child's nodes: the first host node to its right, or its parent's anchor.
 const nextChildNode = (children: Fiber[], start: number, end: Node | null): Node | null => {
 	for (let index = start; index < children.length; index++) {
@@ -1612,10 +1644,6 @@ const nextChildNode = (children: Fiber[], start: number, end: Node | null): Node
 };
 
 const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Node | null) => {
-	if ((fiber.flags & FiberFlag.SubtreeDirty) === 0) {
-		return;
-	}
-
 	const mark = fiber.kind === FiberKind.Provider ? pushProvider(fiber) : -1;
 
 	const children = fiber.children;
@@ -1693,7 +1721,9 @@ const updateFiber = (
 	const vnode = value;
 
 	if (fiber.props === vnode.props && !forced && (fiber.flags & FiberFlag.ForceUpdate) === 0) {
-		updateDirtyChildren(fiber, container, before);
+		if (!subtreeUnchanged(fiber)) {
+			updateDirtyChildren(fiber, container, before);
+		}
 		return;
 	}
 
@@ -1709,7 +1739,9 @@ const updateFiber = (
 		switch (fiber.kind) {
 			case FiberKind.Host: {
 				if (!mounting && shallowEqual(previousProps, vnode.props)) {
-					updateDirtyChildren(fiber, container, before);
+					if (!subtreeUnchanged(fiber)) {
+						updateDirtyChildren(fiber, container, before);
+					}
 					break;
 				}
 
@@ -1885,7 +1917,9 @@ const updateFiber = (
 					(fiber.flags & FiberFlag.ForceUpdate) === 0 &&
 					(fiber.type.compare ?? shallowEqual)(previousProps, vnode.props)
 				) {
-					updateDirtyChildren(fiber, container, before);
+					if (!subtreeUnchanged(fiber)) {
+						updateDirtyChildren(fiber, container, before);
+					}
 
 					break;
 				}
