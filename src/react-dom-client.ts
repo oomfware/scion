@@ -1,1 +1,1 @@
-export { createRoot, version } from './runtime';
+export { createRoot, version } from './runtime.ts';
