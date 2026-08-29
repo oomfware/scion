@@ -1127,7 +1127,7 @@ const drainCascade = (root: Root) => {
 	}
 };
 
-const newCommitQueues = (): Array<Array<() => void>> => [[], [], [], [], [], [], []];
+const newCommitQueues = (): Array<Array<() => void>> => [[], [], [], [], [], []];
 
 // every commit drains its queues, so the next pass always starts from empty ones.
 const runQueue = (queue: Array<() => void>) => {
