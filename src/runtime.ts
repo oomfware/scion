@@ -2876,6 +2876,16 @@ const handlerKey = (name: string, capture: boolean): `__scion$${string}` => {
 // ignore handlers attached after the current dispatch began.
 let eventClock = 0;
 
+// libraries written against react feature-detect this surface on the event they
+// are handed — base-ui and radix both do — so every dispatch path has to paint it
+// on before invoking a handler. mutates `event` in place.
+const paintSyntheticSurface = (event: ScionEvent) => {
+	event.nativeEvent ??= event;
+	event.isDefaultPrevented ??= () => event.defaultPrevented;
+	event.isPropagationStopped ??= () => event.cancelBubble;
+	event.persist ??= () => {};
+};
+
 const createEventProxy = (capture: boolean) => {
 	return (event: ScionEvent): void => {
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion
@@ -2886,10 +2896,7 @@ const createEventProxy = (capture: boolean) => {
 		event.__scionDispatch ??= eventClock++;
 		try {
 			if (record && event.__scionDispatch >= record.attachedAt) {
-				event.nativeEvent ??= event;
-				event.isDefaultPrevented ??= () => event.defaultPrevented;
-				event.isPropagationStopped ??= () => event.cancelBubble;
-				event.persist ??= () => {};
+				paintSyntheticSurface(event);
 				record.handler(event);
 			}
 		} finally {
@@ -3002,6 +3009,7 @@ const dispatchPortalEvent = (
 			configurable: true,
 			value: fiber.node,
 		});
+		paintSyntheticSurface(event);
 		record.handler(event);
 	}
 	Reflect.deleteProperty(event, 'currentTarget');

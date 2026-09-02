@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode, SyntheticEvent } from 'react';
 import { createPortal as reactCreatePortal } from 'react-dom';
 import { expect, test } from 'vitest';
 
@@ -107,6 +107,24 @@ test('a capture handler above a portal sees the event first', async () => {
 				{createPortal(<button onClick={() => scenario.log('portal child')}>go</button>, target)}
 			</div>,
 		);
+		await scenario.act(() => target.querySelector('button')!.click());
+		target.remove();
+	});
+});
+
+test('a react ancestor above a portal receives the synthetic-event surface too', async () => {
+	await expectAgreement(async (scenario) => {
+		const target = makeTarget(scenario);
+		const probe = (event: SyntheticEvent<HTMLElement>) => {
+			scenario.log(
+				'ancestor capture',
+				typeof event.nativeEvent,
+				typeof event.isDefaultPrevented,
+				typeof event.isPropagationStopped,
+				typeof event.persist,
+			);
+		};
+		await scenario.render(<div onClickCapture={probe}>{createPortal(<button>go</button>, target)}</div>);
 		await scenario.act(() => target.querySelector('button')!.click());
 		target.remove();
 	});
