@@ -1,9 +1,9 @@
-// emits dist/. the base config covers test/ too, which must never reach the published output.
 {
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
 		"noEmit": false,
-		"removeComments": true,
+		// tsc strips pure annotations
+		"removeComments": false,
 		"rootDir": "src",
 		"outDir": "dist"
 	},

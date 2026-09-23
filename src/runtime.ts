@@ -398,11 +398,29 @@ const isUnmounted = (fiber: Fiber): boolean => (fiber.flags & FiberFlag.Unmounte
 
 // #region elements
 
-export const Activity = ACTIVITY;
-export const ErrorBoundary = ERROR_BOUNDARY;
+// tree-shaken exports leave their flags false, so minifiers drop the guarded code.
+let hasActivity = false;
+let hasErrorBoundary = false;
+let hasPortal = false;
+let hasSuspense = false;
+
+const enable = <Value>(value: Value, fill: () => void): Value => {
+	fill();
+
+	return value;
+};
+
+export const Activity = /* @__PURE__ */ enable(ACTIVITY, () => {
+	hasActivity = true;
+});
+export const ErrorBoundary = /* @__PURE__ */ enable(ERROR_BOUNDARY, () => {
+	hasErrorBoundary = true;
+});
 export const Fragment = FRAGMENT;
 export const StrictMode = STRICT_MODE;
-export const Suspense = SUSPENSE;
+export const Suspense = /* @__PURE__ */ enable(SUSPENSE, () => {
+	hasSuspense = true;
+});
 
 const assignChildren = (props: Props, children: any[]) => {
 	if (children.length === 1) {
@@ -946,13 +964,14 @@ export const Children = {
 	},
 };
 
-export const createPortal = (
-	children: any,
-	container: Element | DocumentFragment,
-	key?: null | string,
-): VNode => {
-	return createVNode(PORTAL, { children, container }, key);
-};
+export const createPortal = /* @__PURE__ */ enable(
+	(children: any, container: Element | DocumentFragment, key?: null | string): VNode => {
+		return createVNode(PORTAL, { children, container }, key);
+	},
+	() => {
+		hasPortal = true;
+	},
+);
 
 export const createRoot = (
 	container: Element | DocumentFragment,
@@ -1226,10 +1245,14 @@ const renderRootWork = (root: Root, full: boolean) => {
 			runEffects(root.effects, EffectKind.Insertion);
 			runQueue(queues[CommitQueue.RefDetach]);
 			runQueue(queues[CommitQueue.Removal]);
+
 			// a hidden render can add visible nodes, so hide them after DOM changes settle.
-			for (const activity of root.hidden) {
-				hideChildren(activity);
+			if (hasActivity) {
+				for (const activity of root.hidden) {
+					hideChildren(activity);
+				}
 			}
+
 			runQueue(queues[CommitQueue.RefAttach]);
 			runQueue(queues[CommitQueue.AutoFocus]);
 			runEffects(root.effects, EffectKind.Layout);
@@ -1795,7 +1818,12 @@ const updateFiber = (
 				break;
 			}
 			case FiberKind.Activity: {
+				if (!hasActivity) {
+					break;
+				}
+
 				fiber.flags &= ~FiberFlag.ForceUpdate;
+
 				const hidden = vnode.props.mode === 'hidden';
 				const wasHidden = (fiber.flags & FiberFlag.Hidden) !== 0;
 				// keep it hidden during reveal so only reactivation queues its effects.
@@ -1846,6 +1874,10 @@ const updateFiber = (
 				break;
 			}
 			case FiberKind.Portal: {
+				if (!hasPortal) {
+					break;
+				}
+
 				const target: Element | DocumentFragment = vnode.props.container;
 
 				registerPortalTarget(fiber.root, target);
@@ -1867,6 +1899,10 @@ const updateFiber = (
 				break;
 			}
 			case FiberKind.Suspense: {
+				if (!hasSuspense) {
+					break;
+				}
+
 				fiber.flags &= ~FiberFlag.ForceUpdate;
 
 				try {
@@ -1886,6 +1922,10 @@ const updateFiber = (
 				break;
 			}
 			case FiberKind.ErrorBoundary: {
+				if (!hasErrorBoundary) {
+					break;
+				}
+
 				fiber.flags &= ~FiberFlag.ForceUpdate;
 
 				if (fiber.caughtError) {
@@ -2194,16 +2234,32 @@ const kindOf = (value: Child): FiberKind => {
 			return FiberKind.Fragment;
 		}
 		case ACTIVITY: {
-			return FiberKind.Activity;
+			if (hasActivity) {
+				return FiberKind.Activity;
+			}
+
+			break;
 		}
 		case SUSPENSE: {
-			return FiberKind.Suspense;
+			if (hasSuspense) {
+				return FiberKind.Suspense;
+			}
+
+			break;
 		}
 		case ERROR_BOUNDARY: {
-			return FiberKind.ErrorBoundary;
+			if (hasErrorBoundary) {
+				return FiberKind.ErrorBoundary;
+			}
+
+			break;
 		}
 		case PORTAL: {
-			return FiberKind.Portal;
+			if (hasPortal) {
+				return FiberKind.Portal;
+			}
+
+			break;
 		}
 	}
 	switch (type?.$$typeof) {
@@ -2928,7 +2984,9 @@ const setEvent = (element: HostElement, prop: string, handler: any, fiber: Fiber
 	const record = element[key];
 
 	if (record === undefined) {
-		registerPortalEvent(fiber.root, name);
+		if (hasPortal) {
+			registerPortalEvent(fiber.root, name);
+		}
 
 		element[key] = { attachedAt: eventClock, handler };
 		element.addEventListener(name, proxy, capture);
