@@ -424,12 +424,15 @@ test('a keyed reorder preserves the state of nodes moved within their parent', a
 		);
 		await scenario.render(<List order={['a', 'b', 'c']} />);
 		const list = scenario.container.firstElementChild!;
-		const insertBefore = list.insertBefore.bind(list);
-		list.moveBefore = (node, before) => {
-			moves++;
-			insertBefore(node, before);
-		};
+		// scion reaches moveBefore through the prototype, so count the nodes that land instead.
+		const observer = new MutationObserver((records) => {
+			for (const record of records) {
+				moves += record.addedNodes.length;
+			}
+		});
+		observer.observe(list, { childList: true });
 		await scenario.render(<List order={['c', 'a', 'b']} />);
+		observer.disconnect();
 		expect(scenario.html()).toBe('<ul><li>c</li><li>a</li><li>b</li></ul>');
 	});
 	expect(moves).toBe(1);

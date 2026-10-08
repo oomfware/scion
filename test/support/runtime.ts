@@ -67,6 +67,7 @@ export const isValidElement = forward('isValidElement') as typeof react.isValidE
 export const lazy = forward('lazy') as typeof react.lazy;
 export const memo = forward('memo') as typeof react.memo;
 export const startTransition = forward('startTransition') as typeof react.startTransition;
+export const addTransitionType = forward('addTransitionType') as (type: string) => void;
 // #endregion
 
 // jsx does not accept the symbols that both runtimes use as element types.
@@ -74,6 +75,7 @@ export const Activity: any = Symbol.for('react.activity');
 export const Fragment: any = Symbol.for('react.fragment');
 export const StrictMode: any = Symbol.for('react.strict_mode');
 export const Suspense: any = Symbol.for('react.suspense');
+export const ViewTransition: any = Symbol.for('react.view_transition');
 
 export const Children = new Proxy({} as any, {
 	get: (_target, name: string) => activeRuntime().module.Children[name],

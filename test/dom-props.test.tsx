@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 
 import { expectAgreement, runBoth, transition } from './support/differential.ts';
-import type { Scenario } from './support/harness.ts';
+import { runScenario, scionRuntime, type Scenario } from './support/harness.ts';
 
 test('style objects: values, numbers, unitless properties and removal', async () => {
 	await expectAgreement(
@@ -327,4 +327,45 @@ test('a string style is rejected on the render that passes it', async () => {
 	});
 	expect(scion.entries).toEqual(['dom ']);
 	expect(react.entries).toEqual(['render threw', 'dom ']);
+});
+
+test('a string style rejected on update leaves the next render able to recover', async () => {
+	const { react, scion } = await runBoth(async (scenario) => {
+		const App = ({ style, extra }: { style: any; extra: boolean }) => (
+			<div>
+				<i style={style}>styled</i>
+				{extra && <span>extra</span>}
+			</div>
+		);
+		await scenario.render(<App style={{ color: 'red' }} extra={false} />);
+		try {
+			await scenario.render(<App style="color: blue" extra />);
+		} catch {
+			// react rethrows from act; scion reports to the root.
+		}
+		await scenario.render(<App style={{ color: 'green' }} extra />);
+		scenario.snapshot('recovered');
+	});
+	expect(scion.uncaught).toEqual([
+		'TypeError: the `style` prop expects a property-to-value mapping, not a string.',
+	]);
+	expect(scion.snapshots).toEqual(react.snapshots);
+});
+
+test('a dom write that throws at commit does not drop the rest of that commit', async () => {
+	const result = await runScenario(scionRuntime, async (scenario) => {
+		const App = ({ checked, extra }: { checked: boolean; extra: boolean }) => (
+			<div>
+				<input type="checkbox" checked={checked} onChange={() => {}} />
+				{extra && <span>extra</span>}
+			</div>
+		);
+		await scenario.render(<App checked={false} extra={false} />);
+		// a getter-only property makes the commit's write to it throw.
+		Object.defineProperty(scenario.container.querySelector('input')!, 'checked', { get: () => false });
+		await scenario.render(<App checked extra />);
+		scenario.snapshot('after');
+	});
+	expect(result.uncaught).toHaveLength(1);
+	expect(result.snapshots[0][1]).toContain('#text "extra"');
 });

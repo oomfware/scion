@@ -13,6 +13,24 @@ const enum EffectKind {
 	Passive,
 }
 
+// host mutations the render phase records against live nodes, replayed in order at commit.
+const enum HostOp {
+	// container, node, before
+	Insert,
+	// a removal cancelled by a reconcile pass that failed; one operand wide
+	Noop,
+	// element, previous props, next props, fiber
+	Props,
+	// node
+	Remove,
+	// element
+	RestoreControlled,
+	// activity fiber
+	Show,
+	// text node, value
+	Text,
+}
+
 // commit work runs queue by queue, in declaration order.
 const enum CommitQueue {
 	LayoutCleanup,
@@ -41,6 +59,7 @@ const enum FiberKind {
 	Provider,
 	Suspense,
 	Text,
+	ViewTransition,
 }
 
 const fiberKindNames = [
@@ -53,6 +72,7 @@ const fiberKindNames = [
 	'provider',
 	'suspense',
 	'text',
+	'view-transition',
 ];
 
 const fiberKindName = (kind: FiberKind): string => fiberKindNames[kind];
@@ -239,8 +259,18 @@ interface Root {
 	scheduled: boolean;
 	scheduleReason?: string;
 
+	// where pending work came from; a pass animates only when all of it came from transitions.
+	transitionLane: boolean;
+	urgentLane: boolean;
+	// transition types collected for the pending work.
+	transitionTypes: string[] | null;
+	// set while a rendered pass waits for the browser to snapshot the old state.
+	pendingCommit: (() => void) | null;
+
 	effects: PendingEffect | null;
 	effectsTail: PendingEffect | null;
+	// `HostOp` entries, each an opcode followed by its operands.
+	ops: any[];
 	// deferred commit work, indexed by `CommitQueue`.
 	queues: Array<Array<() => void>>;
 
@@ -297,6 +327,7 @@ const PORTAL = Symbol.for('react.portal');
 const PROVIDER = Symbol.for('react.provider');
 const STRICT_MODE = Symbol.for('react.strict_mode');
 const SUSPENSE = Symbol.for('react.suspense');
+const VIEW_TRANSITION = Symbol.for('react.view_transition');
 
 const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
@@ -323,6 +354,15 @@ let currentHook: Hook | null = null;
 
 let reconcileDepth = 0;
 let reconcilePass = 0;
+// true while reconciling inside a host element created this pass. such nodes are not attached
+// yet, so they take their mutations directly instead of through the root's op journal.
+let detached = false;
+// what the pass being reconciled may animate, when it is eligible for a view transition.
+let transitionFrame: TransitionFrame | null = null;
+// innermost `<ViewTransition>` on the render stack, which owns the host mutations below it.
+let enclosingBoundary: Fiber | null = null;
+// true while mounting below the root of an inserted subtree.
+let inserting = false;
 
 let batching = 0;
 let draining = false;
@@ -332,6 +372,8 @@ let synchronousEffects = 0;
 // root whose render, commit, or effect flush is active.
 let renderingRoot: Root | null = null;
 let transitionScheduled = false;
+// the startTransition call being run, if any.
+let transitionScope: { roots: Root[]; types: string[] } | null = null;
 
 let familyResolver: ((type: any) => { current: any } | undefined) | null = null;
 let refreshInstallScheduled = false;
@@ -403,6 +445,7 @@ let hasActivity = false;
 let hasErrorBoundary = false;
 let hasPortal = false;
 let hasSuspense = false;
+let hasViewTransition = false;
 
 const enable = <Value>(value: Value, fill: () => void): Value => {
 	fill();
@@ -420,6 +463,9 @@ export const Fragment = FRAGMENT;
 export const StrictMode = STRICT_MODE;
 export const Suspense = /* @__PURE__ */ enable(SUSPENSE, () => {
 	hasSuspense = true;
+});
+export const ViewTransition = /* @__PURE__ */ enable(VIEW_TRANSITION, () => {
+	hasViewTransition = true;
 });
 
 const assignChildren = (props: Props, children: any[]) => {
@@ -917,11 +963,24 @@ export const useEffectEvent = <Args extends unknown[], Return>(callback: (...arg
 export const useDebugValue = (_value: unknown, _format?: (value: unknown) => unknown) => {};
 
 export const startTransition = (callback: () => void) => {
+	const outer = transitionScope;
+	const scope = outer ?? { roots: [], types: [] };
+	transitionScope = scope;
 	batching++;
 	try {
 		callback();
 	} finally {
 		batching--;
+		transitionScope = outer;
+	}
+	// types added after a setState still belong to the update it scheduled.
+	if (outer === null && scope.types.length !== 0) {
+		for (const root of scope.roots) {
+			const types = (root.transitionTypes ??= []);
+			for (const type of scope.types) {
+				addType(types, type);
+			}
+		}
 	}
 	if (transitionScheduled) {
 		return;
@@ -931,6 +990,28 @@ export const startTransition = (callback: () => void) => {
 		transitionScheduled = false;
 		flushRoots();
 	}, 0);
+};
+
+/**
+ * names the cause of the transition being started, so `<ViewTransition>` class maps and the
+ * browser's `:active-view-transition-type()` can tell transitions apart.
+ *
+ * @param type an arbitrary transition type; only meaningful inside `startTransition`
+ */
+export const addTransitionType = (type: string) => {
+	if (transitionScope === null) {
+		if (DEV) {
+			console.error('addTransitionType can only be called inside startTransition.');
+		}
+		return;
+	}
+	addType(transitionScope.types, type);
+};
+
+const addType = (types: string[], type: string) => {
+	if (!types.includes(type)) {
+		types.push(type);
+	}
 };
 
 // #endregion
@@ -996,11 +1077,16 @@ export const createRoot = (
 		nextId: 0,
 		onCaughtError: options.onCaughtError,
 		onUncaughtError: options.onUncaughtError,
+		ops: [],
+		pendingCommit: null,
 		portalCleanups: [],
 		portalEvents: new Set(),
 		portalTargets: new Set(),
 		queues: newCommitQueues(),
 		scheduled: false,
+		transitionLane: false,
+		transitionTypes: null,
+		urgentLane: false,
 	};
 	if (DEV) {
 		root.id = rendererId ?? -1;
@@ -1019,6 +1105,16 @@ export const createRoot = (
 				return;
 			}
 			root.element = element;
+			// inside a transition the render waits with the rest of it.
+			if (transitionScope !== null) {
+				root.fullRender = true;
+				scheduleRootWork(root, null);
+				return;
+			}
+			// any transition work this pass picks up commits with it, unanimated.
+			if (hasViewTransition) {
+				root.urgentLane = true;
+			}
 			renderRootWork(root, true);
 		},
 		unmount() {
@@ -1026,6 +1122,7 @@ export const createRoot = (
 				return;
 			}
 
+			root.pendingCommit?.();
 			root.disposed = true;
 			root.queues = newCommitQueues();
 			for (const fiber of root.fibers) {
@@ -1086,12 +1183,28 @@ const scheduleFiber = (fiber: Fiber) => {
 	scheduleRootWork(fiber.root, fiber);
 };
 
-const scheduleRootWork = (root: Root, fiber: Fiber) => {
+const scheduleRootWork = (root: Root, fiber: Fiber | null) => {
+	// only view transitions tell transition work from urgent work.
+	if (hasViewTransition) {
+		if (transitionScope === null) {
+			root.urgentLane = true;
+		} else {
+			root.transitionLane = true;
+			if (!transitionScope.roots.includes(root)) {
+				transitionScope.roots.push(root);
+			}
+		}
+	}
+	queueRootWork(root, fiber);
+};
+
+// queues a root for the next flush, leaving its lanes to the caller.
+const queueRootWork = (root: Root, fiber: Fiber | null) => {
 	// work scheduled by active root work extends its cascade.
 	if (renderingRoot === root) {
 		root.cascadeScheduled = true;
 		if (DEV) {
-			root.scheduleReason = describeFiber(fiber);
+			root.scheduleReason = fiber ? describeFiber(fiber) : 'root';
 		}
 	}
 	if (root.scheduled) {
@@ -1106,6 +1219,9 @@ const scheduleRootWork = (root: Root, fiber: Fiber) => {
 
 const renderPass = (root: Root) => {
 	root.scheduled = false;
+	if (hasViewTransition && holdForViewTransition(root)) {
+		return;
+	}
 	const full = root.fullRender;
 	root.fullRender = false;
 	renderRootWork(root, full);
@@ -1174,14 +1290,36 @@ const renderRootWork = (root: Root, full: boolean) => {
 		return;
 	}
 
+	// a pass still waiting on its snapshot owns the journal and effects, so it lands first.
+	if (hasViewTransition) {
+		root.pendingCommit?.();
+	}
+
 	root.effects = null;
 	root.effectsTail = null;
+	const frame = hasViewTransition ? openTransitionFrame(root) : null;
+	const failed = reconcileRoot(root, full, frame);
+
+	if (frame !== null && startViewTransitionFrame(root, frame, failed)) {
+		return;
+	}
+
+	commitRoot(root, failed);
+	drainCascade(root);
+};
+
+// renders the pending work, recording host mutations instead of performing them.
+const reconcileRoot = (root: Root, full: boolean, frame: TransitionFrame | null): boolean => {
+	let failed = false;
 	const previousRoot = renderingRoot;
+	const previousFrame = transitionFrame;
+	const previousBoundary = enclosingBoundary;
 	renderingRoot = root;
+	transitionFrame = frame;
+	enclosingBoundary = null;
 	try {
 		const hook = DEV ? getDevtoolsHook() : undefined;
 		hook?.onScheduleFiberRoot?.(root.id, root, root.element);
-		let failed = false;
 
 		const targets = root.dirty;
 		root.dirty = [];
@@ -1236,33 +1374,50 @@ const renderRootWork = (root: Root, full: boolean) => {
 				}
 			}
 		}
+	} finally {
+		renderingRoot = previousRoot;
+		transitionFrame = previousFrame;
+		enclosingBoundary = previousBoundary;
+	}
 
-		{
-			const commitHook = DEV ? getDevtoolsHook() : undefined;
-			commitHook?.onCommitFiberRoot?.(root.id, root, null, failed);
-			const queues = root.queues;
-			runQueue(queues[CommitQueue.LayoutCleanup]);
-			runEffects(root.effects, EffectKind.Insertion);
-			runQueue(queues[CommitQueue.RefDetach]);
-			runQueue(queues[CommitQueue.Removal]);
+	return failed;
+};
 
-			// a hidden render can add visible nodes, so hide them after DOM changes settle.
-			if (hasActivity) {
-				for (const activity of root.hidden) {
-					hideChildren(activity);
-				}
-			}
-
-			runQueue(queues[CommitQueue.RefAttach]);
-			runQueue(queues[CommitQueue.AutoFocus]);
-			runEffects(root.effects, EffectKind.Layout);
-			flushPassiveEffects(root, synchronousEffects > 0);
+// performs the recorded host mutations, then the commit queues and effects.
+const commitRoot = (root: Root, failed: boolean) => {
+	const previousRoot = renderingRoot;
+	renderingRoot = root;
+	try {
+		const commitHook = DEV ? getDevtoolsHook() : undefined;
+		commitHook?.onCommitFiberRoot?.(root.id, root, null, failed);
+		const queues = root.queues;
+		// read once: an effect that renders this root again starts a list of its own.
+		const effects = root.effects;
+		try {
+			applyHostOps(root.ops);
+		} catch (error) {
+			root.onUncaughtError?.(error);
+			console.error(error);
 		}
+		runQueue(queues[CommitQueue.LayoutCleanup]);
+		runEffects(effects, EffectKind.Insertion);
+		runQueue(queues[CommitQueue.RefDetach]);
+		runQueue(queues[CommitQueue.Removal]);
+
+		// a hidden render can add visible nodes, so hide them after DOM changes settle.
+		if (hasActivity) {
+			for (const activity of root.hidden) {
+				hideChildren(activity);
+			}
+		}
+
+		runQueue(queues[CommitQueue.RefAttach]);
+		runQueue(queues[CommitQueue.AutoFocus]);
+		runEffects(effects, EffectKind.Layout);
+		flushPassiveEffects(root, effects, synchronousEffects > 0);
 	} finally {
 		renderingRoot = previousRoot;
 	}
-
-	drainCascade(root);
 };
 
 // #endregion
@@ -1423,18 +1578,13 @@ const unwrapSoleFragment = (children: any): any => {
 };
 
 // detach dropped nodes before mounting replacements to reduce live DOM work.
-const detachDropped = (previous: Fiber[], pass: number, end: Node | null): Array<Node | null> | null => {
-	let detached: Array<Node | null> | null = null;
-
+const detachDropped = (previous: Fiber[], pass: number, end: Node | null, ops: any[]) => {
 	const detach = (node: ChildNode) => {
 		// keep the reconciliation anchor attached.
-		if (node === end) {
-			return;
+		if (node !== end) {
+			ops.push(HostOp.Remove, node);
+			noteMutation();
 		}
-
-		(detached ??= []).push(node, node.nextSibling);
-
-		node.remove();
 	};
 
 	for (const fiber of previous) {
@@ -1442,13 +1592,12 @@ const detachDropped = (previous: Fiber[], pass: number, end: Node | null): Array
 			forEachNode(fiber, detach);
 		}
 	}
-
-	return detached;
 };
 
-const restoreDetached = (container: HostContainer, detached: Array<Node | null>) => {
-	for (let index = detached.length - 2; index >= 0; index -= 2) {
-		container.insertBefore(detached[index]!, detached[index + 1]);
+// the dropped fibers stay mounted when their pass fails, so their nodes must stay too.
+const cancelDetached = (ops: any[], start: number, end: number) => {
+	for (let index = start; index < end; index += 2) {
+		ops[index] = HostOp.Noop;
 	}
 };
 
@@ -1489,7 +1638,10 @@ const reconcileChildren = (
 	let mounted: Fiber[] | null = null;
 	let matches: Array<Fiber | undefined> = EMPTY_CHILDREN;
 	let moves: Int32Array | null = null;
-	let detached: Array<Node | null> | null = null;
+	let moved = false;
+	const ops = root.ops;
+	let detachStart = 0;
+	let detachEnd = 0;
 
 	try {
 		// plan matches before placement so anchors use valid claims.
@@ -1497,7 +1649,9 @@ const reconcileChildren = (
 			matches = [];
 			if (matchChildren(previous, values, matches, pass)) {
 				moves = markMovedChildren(matches);
-				detached = detachDropped(previous, pass, end);
+				detachStart = ops.length;
+				detachDropped(previous, pass, end, ops);
+				detachEnd = ops.length;
 			}
 		}
 
@@ -1528,7 +1682,11 @@ const reconcileChildren = (
 			}
 
 			if (held && moves !== null && moves[index] === MOVED_CHILD && fiber.firstHost !== anchor) {
-				forEachNode(fiber, (node) => moveNode(container, node, anchor));
+				forEachNode(fiber, (node) => {
+					ops.push(HostOp.Insert, container, node, anchor);
+				});
+				moved = true;
+				noteMutation();
 			}
 
 			next ??= [];
@@ -1543,9 +1701,7 @@ const reconcileChildren = (
 			}
 		}
 
-		if (detached) {
-			restoreDetached(container, detached);
-		}
+		cancelDetached(ops, detachStart, detachEnd);
 
 		throw error;
 	} finally {
@@ -1555,10 +1711,17 @@ const reconcileChildren = (
 		reconcileDepth--;
 	}
 
+	let removed = false;
 	for (const fiber of previous) {
 		if (fiber.pass !== pass) {
 			unmountFiber(fiber);
+			removed = true;
 		}
+	}
+
+	// a changed set or order of siblings can shift the boundaries among them.
+	if (hasViewTransition && transitionFrame !== null && next !== null && (mounted !== null || moved || removed)) {
+		transitionFrame.scopes.push(next);
 	}
 
 	return next ?? EMPTY_CHILDREN;
@@ -1601,6 +1764,11 @@ const reconcileFiber = (
 	}
 
 	const fiber = createFiber(parent, value, container, before, root);
+	const frame = hasViewTransition ? transitionFrame : null;
+	const outerInserting = inserting;
+	if (frame !== null) {
+		inserting = true;
+	}
 
 	try {
 		updateFiber(fiber, value, container, before, UpdateFiber.Mounting);
@@ -1608,6 +1776,13 @@ const reconcileFiber = (
 		unmountFiber(fiber);
 
 		throw error;
+	} finally {
+		inserting = outerInserting;
+	}
+
+	// only the root of an inserted subtree can enter; its boundaries are found once it is built.
+	if (frame !== null && !outerInserting) {
+		frame.inserted.push(fiber);
 	}
 
 	return fiber;
@@ -1668,6 +1843,10 @@ const nextChildNode = (children: Fiber[], start: number, end: Node | null): Node
 
 const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Node | null) => {
 	const mark = fiber.kind === FiberKind.Provider ? pushProvider(fiber) : -1;
+	const outerBoundary = enclosingBoundary;
+	if (hasViewTransition && fiber.kind === FiberKind.ViewTransition) {
+		enclosingBoundary = fiber;
+	}
 
 	const children = fiber.children;
 	const element = fiber.kind === FiberKind.Host ? fiber.node : null;
@@ -1691,7 +1870,8 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 				(child.kind === FiberKind.Component ||
 					child.kind === FiberKind.Fragment ||
 					child.kind === FiberKind.Host ||
-					child.kind === FiberKind.Provider)
+					child.kind === FiberKind.Provider ||
+					child.kind === FiberKind.ViewTransition)
 			) {
 				updateDirtyChildren(child, childContainer, anchor);
 			} else {
@@ -1701,8 +1881,8 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 			firstHostMoved ||= child.firstHost !== previousFirstHost;
 		}
 
-		if (element) {
-			restoreControlled(element);
+		if (element !== null && isControlled(element)) {
+			fiber.root.ops.push(HostOp.RestoreControlled, element);
 		}
 	} catch (error) {
 		refreshFirstHost(fiber);
@@ -1711,6 +1891,7 @@ const updateDirtyChildren = (fiber: Fiber, container: HostContainer, before: Nod
 		if (mark >= 0) {
 			popProviders(mark);
 		}
+		enclosingBoundary = outerBoundary;
 	}
 
 	fiber.flags &= ~FiberFlag.SubtreeDirty;
@@ -1733,11 +1914,16 @@ const updateFiber = (
 	if (typeof value === 'string') {
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion
 		const text = fiber as TextFiber;
-		if (text.node.data !== value) {
-			text.node.data = value;
+		// a hidden activity blanks the node, so the string to restore lives on the fiber.
+		if (text.type !== value) {
+			text.type = value;
+			if (detached) {
+				text.node.data = value;
+			} else {
+				text.root.ops.push(HostOp.Text, text.node, value);
+				noteMutation();
+			}
 		}
-		// a hidden activity blanks the node, so keep the string to restore.
-		text.type = value;
 		return;
 	}
 
@@ -1752,6 +1938,7 @@ const updateFiber = (
 
 	const previousChildren = fiber.children;
 	const previousProps = fiber.props;
+	const wasDetached = detached;
 
 	fiber.props = vnode.props;
 	if (DEV && familyResolver) {
@@ -1771,9 +1958,25 @@ const updateFiber = (
 				const element = fiber.node;
 				if (mounting) {
 					element.__scionFiber = fiber;
+					updateProps(element, previousProps, vnode.props, fiber);
+				} else {
+					// markup replaces the child nodes, so their fibers go now.
+					if (vnode.props.dangerouslySetInnerHTML && fiber.children.length !== 0) {
+						discardChildren(fiber);
+					}
+					// rejected while rendering, where a boundary can catch it, rather than at commit.
+					assertStyleObject(vnode.props.style);
+					// a host re-rendered by its parent usually changes only its children array.
+					if (hostPropsDiffer(previousProps, vnode.props)) {
+						fiber.root.ops.push(HostOp.Props, element, previousProps, vnode.props, fiber);
+						if (hasViewTransition && transitionFrame !== null && hasVisualChange(previousProps, vnode.props)) {
+							noteMutation();
+						}
+					}
 				}
 
-				updateProps(element, previousProps, vnode.props, fiber);
+				// a fresh element stays detached until commit; a live one defers its children too.
+				detached = mounting;
 
 				if (!vnode.props.dangerouslySetInnerHTML) {
 					const children = vnode.props.children;
@@ -1786,9 +1989,13 @@ const updateFiber = (
 						fiber.children = reconcileInnerChildren(fiber, children, element, null);
 					}
 				}
-				restoreControlled(element);
-				if (mounting && vnode.props.defaultValue != null) {
-					applySelectDefault(element, vnode.props);
+				if (mounting) {
+					restoreControlled(element);
+					if (vnode.props.defaultValue != null) {
+						applySelectDefault(element, vnode.props);
+					}
+				} else if (isControlled(element)) {
+					fiber.root.ops.push(HostOp.RestoreControlled, element);
 				}
 
 				if (mounting && vnode.props.autoFocus && element instanceof HTMLElement && !isDeactivated(fiber)) {
@@ -1817,6 +2024,32 @@ const updateFiber = (
 				fiber.children = reconcileInnerChildren(fiber, vnode.props.children, container, before);
 				break;
 			}
+			case FiberKind.ViewTransition: {
+				if (!hasViewTransition) {
+					break;
+				}
+
+				// counted before the children render, so a failed mount's teardown takes back what it added.
+				namedBoundaries +=
+					Number(isExplicitName(vnode.props.name)) - Number(!mounting && isExplicitName(previousProps.name));
+
+				const outerBoundary = enclosingBoundary;
+				enclosingBoundary = fiber;
+				try {
+					fiber.children = reconcileInnerChildren(fiber, vnode.props.children, container, before);
+				} finally {
+					enclosingBoundary = outerBoundary;
+				}
+
+				const previousRef = previousProps.ref;
+				const nextRef = vnode.props.ref;
+				if ((previousRef != null || nextRef != null) && (mounting || previousRef !== nextRef)) {
+					queueRefDetach(fiber);
+					queueRefAttach(fiber, nextRef, transitionInstance(fiber));
+				}
+
+				break;
+			}
 			case FiberKind.Activity: {
 				if (!hasActivity) {
 					break;
@@ -1831,6 +2064,11 @@ const updateFiber = (
 				if (hidden && !wasHidden) {
 					fiber.root.hidden.add(fiber);
 					deactivateFiber(fiber);
+					// hiding exits the boundaries as they were before this render.
+					if (hasViewTransition && transitionFrame !== null && !mounting) {
+						collectChildBoundaries(fiber, transitionFrame.exits);
+						noteMutation();
+					}
 				}
 
 				try {
@@ -1852,8 +2090,12 @@ const updateFiber = (
 
 				if (wasHidden && !hidden) {
 					fiber.root.hidden.delete(fiber);
-					showChildren(fiber);
+					fiber.root.ops.push(HostOp.Show, fiber);
 					reactivateFiber(fiber);
+					if (hasViewTransition && transitionFrame !== null) {
+						collectChildBoundaries(fiber, transitionFrame.enters);
+						noteMutation();
+					}
 				}
 
 				break;
@@ -1892,9 +2134,20 @@ const updateFiber = (
 
 					fiber.portalStart = document.createComment('');
 					fiber.portalEnd = document.createComment('');
-					target.append(fiber.portalStart, fiber.portalEnd);
+					fiber.root.ops.push(
+						HostOp.Insert,
+						target,
+						fiber.portalStart,
+						null,
+						HostOp.Insert,
+						target,
+						fiber.portalEnd,
+						null,
+					);
 				}
 
+				// the target is outside this tree, so its children are live whatever the portal's own state.
+				detached = false;
 				fiber.children = reconcileInnerChildren(fiber, vnode.props.children, target, fiber.portalEnd);
 				break;
 			}
@@ -2020,10 +2273,12 @@ const updateFiber = (
 			}
 		}
 	} catch (error) {
+		detached = wasDetached;
 		// leave the dirty path in place; the retry has to reach the same descendants.
 		refreshFirstHost(fiber);
 		throw error;
 	}
+	detached = wasDetached;
 
 	// every descendant was either rendered or bailed out on a clean subtree of its own.
 	fiber.flags &= ~FiberFlag.SubtreeDirty;
@@ -2093,7 +2348,11 @@ const retryWhenSettled = (fiber: Fiber, thenable: PromiseLike<unknown>) => {
 
 		// the boundary can sit under an ancestor that already bailed out, so render from the root.
 		fiber.root.fullRender = true;
-		scheduleRootWork(fiber.root, fiber);
+		// a reveal animates like a transition, without the types of the one that suspended.
+		if (hasViewTransition) {
+			fiber.root.transitionLane = true;
+		}
+		queueRootWork(fiber.root, fiber);
 	};
 
 	Promise.resolve(thenable).then(retry, retry);
@@ -2143,6 +2402,7 @@ const rerenderFiber = (fiber: Fiber) => {
 	const previousFirstHost = fiber.firstHost;
 	let container: HostContainer | undefined;
 	let providers: Fiber[] | undefined;
+	let boundary: Fiber | null = null;
 	for (let parent = fiber.parent; parent !== null; parent = parent.parent) {
 		switch (parent.kind) {
 			case FiberKind.Host: {
@@ -2157,6 +2417,10 @@ const rerenderFiber = (fiber: Fiber) => {
 				(providers ??= []).push(parent);
 				break;
 			}
+			case FiberKind.ViewTransition: {
+				boundary ??= parent;
+				break;
+			}
 		}
 	}
 	container ??= fiber.root.container;
@@ -2169,9 +2433,13 @@ const rerenderFiber = (fiber: Fiber) => {
 		}
 	}
 
+	const outerBoundary = enclosingBoundary;
+	enclosingBoundary = boundary;
+
 	try {
 		updateFiber(fiber, selfVNode(fiber), container, nextNode(fiber), UpdateFiber.Forced);
 	} finally {
+		enclosingBoundary = outerBoundary;
 		popProviders(mark);
 		if (fiber.firstHost !== previousFirstHost) {
 			refreshAncestorFirstHosts(fiber);
@@ -2261,6 +2529,13 @@ const kindOf = (value: Child): FiberKind => {
 
 			break;
 		}
+		case VIEW_TRANSITION: {
+			if (hasViewTransition) {
+				return FiberKind.ViewTransition;
+			}
+
+			break;
+		}
 	}
 	switch (type?.$$typeof) {
 		case CONTEXT:
@@ -2316,7 +2591,7 @@ const createFiber = (
 	switch (kind) {
 		case FiberKind.Text: {
 			const node = document.createTextNode(typeof value === 'string' ? value : '');
-			container.insertBefore(node, before);
+			insertNode(root, container, node, before);
 			return createFiberNode(kind, node, parent, value, root, type);
 		}
 		case FiberKind.Host: {
@@ -2325,7 +2600,7 @@ const createFiber = (
 				namespace === HTML_NAMESPACE
 					? document.createElement(type)
 					: document.createElementNS(namespace, type);
-			container.insertBefore(element, before);
+			insertNode(root, container, element, before);
 			return createFiberNode(kind, element, parent, value, root, type);
 		}
 		default: {
@@ -2334,23 +2609,111 @@ const createFiber = (
 	}
 };
 
-const isElementContainer = (container: HostContainer): container is Element =>
-	container.nodeType === Node.ELEMENT_NODE;
-
+// `instanceof` reads no property of the container, see `insertChild`.
 const hostNamespace = (container: HostContainer, type: string): string => {
-	return type === 'svg' ||
-		(isElementContainer(container) &&
-			container.namespaceURI === SVG_NAMESPACE &&
-			container.nodeName !== 'foreignObject')
+	return type === 'svg' || (container instanceof SVGElement && !(container instanceof SVGForeignObjectElement))
 		? SVG_NAMESPACE
 		: HTML_NAMESPACE;
 };
 
+// a <form> exposes its controls as named properties that shadow its prototype, so every method or
+// accessor read on one searches its controls, and a mutation invalidates the index that search
+// uses. placing n controls into a form that way costs O(n²); calling through the prototypes skips it.
+/* oxlint-disable typescript/unbound-method -- each is called with an explicit receiver */
+const domPrototypes =
+	typeof Node === 'undefined'
+		? null
+		: {
+				elementMoveBefore: SUPPORTS_MOVE_BEFORE ? Element.prototype.moveBefore : null,
+				fragmentMoveBefore: SUPPORTS_MOVE_BEFORE ? DocumentFragment.prototype.moveBefore : null,
+				insertBefore: Node.prototype.insertBefore,
+				parentNode: Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode')!.get!,
+				removeChild: Node.prototype.removeChild,
+			};
+/* oxlint-enable typescript/unbound-method */
+
+const insertChild = (container: HostContainer, node: Node, before: Node | null) => {
+	domPrototypes!.insertBefore.call(container, node, before);
+};
+
+const parentOf = (node: Node): ParentNode | null => domPrototypes!.parentNode.call(node);
+
+const removeNode = (node: Node) => {
+	const parent = parentOf(node);
+	if (parent !== null) {
+		domPrototypes!.removeChild.call(parent, node);
+	}
+};
+
 const moveNode = (container: HostContainer, node: Node, before: Node | null) => {
-	if (SUPPORTS_MOVE_BEFORE && node.parentNode === container) {
-		container.moveBefore(node, before);
+	if (SUPPORTS_MOVE_BEFORE && parentOf(node) === container) {
+		const move = container instanceof Element ? domPrototypes!.elementMoveBefore : domPrototypes!.fragmentMoveBefore;
+		move!.call(container, node, before);
 	} else {
-		container.insertBefore(node, before);
+		insertChild(container, node, before);
+	}
+};
+
+// places a node now when its container is still detached, otherwise at commit.
+const insertNode = (root: Root, container: HostContainer, node: Node, before: Node | null) => {
+	if (detached) {
+		insertChild(container, node, before);
+	} else {
+		root.ops.push(HostOp.Insert, container, node, before);
+		noteMutation();
+	}
+};
+
+const applyHostOps = (ops: any[]) => {
+	try {
+		replayHostOps(ops);
+	} finally {
+		ops.length = 0;
+	}
+};
+
+// entries per op, opcode included, indexed by `HostOp`.
+const hostOpWidths = [4, 2, 5, 2, 2, 2, 3];
+
+// render already treated every op as done, so one that throws can't stop the ones after it.
+const replayHostOps = (ops: any[]) => {
+	let failure: { error: unknown } | null = null;
+	for (let index = 0; index < ops.length; ) {
+		const op: HostOp = ops[index];
+		try {
+			switch (op) {
+				case HostOp.Insert: {
+					moveNode(ops[index + 1], ops[index + 2], ops[index + 3]);
+					break;
+				}
+				case HostOp.Props: {
+					updateProps(ops[index + 1], ops[index + 2], ops[index + 3], ops[index + 4]);
+					break;
+				}
+				case HostOp.Remove: {
+					removeNode(ops[index + 1]);
+					break;
+				}
+				case HostOp.RestoreControlled: {
+					restoreControlled(ops[index + 1]);
+					break;
+				}
+				case HostOp.Show: {
+					showChildren(ops[index + 1]);
+					break;
+				}
+				case HostOp.Text: {
+					ops[index + 1].data = ops[index + 2];
+					break;
+				}
+			}
+		} catch (error) {
+			failure ??= { error };
+		}
+		index += hostOpWidths[op];
+	}
+	if (failure !== null) {
+		throw failure.error;
 	}
 };
 
@@ -2468,6 +2831,9 @@ const unmountFiberTree = (fiber: Fiber) => {
 	if (fiber.kind === FiberKind.Activity) {
 		fiber.root.hidden.delete(fiber);
 	}
+	if (hasViewTransition && fiber.kind === FiberKind.ViewTransition && isExplicitName(fiber.props.name)) {
+		namedBoundaries--;
+	}
 	unsubscribeContexts(fiber, fiber.contexts);
 	fiber.contexts = null;
 	queueHookCleanups(fiber);
@@ -2487,9 +2853,19 @@ const unmountFiber = (fiber: Fiber) => {
 		return;
 	}
 
+	// the subtree still holds its old nodes, so its boundaries can be named for the old snapshot.
+	if (hasViewTransition && transitionFrame !== null) {
+		transitionFrame.removed.push(fiber);
+		// inside a hidden activity there was nothing on screen to exit.
+		if (!isDeactivated(fiber)) {
+			collectBoundaries(fiber, transitionFrame.exits);
+		}
+		noteMutation();
+	}
+
 	unmountFiberTree(fiber);
 	fiber.root.queues[CommitQueue.Removal].push(() => {
-		forEachNode(fiber, (node) => node.remove());
+		forEachNode(fiber, removeNode);
 	});
 };
 
@@ -2684,6 +3060,21 @@ const mapChildren = (
 
 // #region DOM props
 
+// whether `updateProps` would write anything.
+const hostPropsDiffer = (previous: Props, next: Props): boolean => {
+	for (const name in next) {
+		if (name !== 'children' && !Object.is(previous[name], next[name])) {
+			return true;
+		}
+	}
+	for (const name in previous) {
+		if (name !== 'children' && !Object.hasOwn(next, name)) {
+			return true;
+		}
+	}
+	return false;
+};
+
 const updateProps = (element: HostElement, previous: Props, next: Props, fiber: Fiber) => {
 	for (const name in previous) {
 		if (name !== 'children' && !Object.hasOwn(next, name)) {
@@ -2724,7 +3115,6 @@ const setProp = (element: HostElement, name: string, value: any, previous: any, 
 		case 'dangerouslySetInnerHTML': {
 			const html = value?.__html ?? '';
 			if (element.innerHTML !== html) {
-				discardChildren(fiber);
 				element.innerHTML = html;
 			}
 			return;
@@ -2882,13 +3272,23 @@ const unitless = new Set([
 
 type StyleValue = string | number | null | undefined;
 
+const assertStyleObject: (style: unknown) => asserts style is Record<string, StyleValue> | null | undefined = (
+	style,
+) => {
+	if (typeof style === 'string') {
+		throw new TypeError(`the \`style\` prop expects a property-to-value mapping, not a string.`);
+	}
+};
+
 const setStyle = (
 	style: CSSStyleDeclaration,
-	previous: Record<string, StyleValue> | null | undefined,
+	previous: Record<string, StyleValue> | string | null | undefined,
 	next: Record<string, StyleValue> | string | null | undefined,
 ) => {
-	if (typeof next === 'string') {
-		throw new TypeError(`the \`style\` prop expects a property-to-value mapping, not a string.`);
+	assertStyleObject(next);
+	// a rejected string stays on the fiber's props but never reached the element.
+	if (typeof previous === 'string') {
+		previous = null;
 	}
 	for (const name in previous) {
 		if (next == null || !(name in next)) {
@@ -2957,7 +3357,15 @@ const createEventProxy = (capture: boolean) => {
 			}
 		} finally {
 			if (event.type === 'input' && isControlled(element)) {
-				queueMicrotask(() => restoreControlled(element));
+				queueMicrotask(() => {
+					const root = element.__scionFiber?.root;
+					// the props of a pass awaiting its commit aren't on screen yet, so restore with it.
+					if (root?.pendingCommit != null) {
+						root.ops.push(HostOp.RestoreControlled, element);
+					} else {
+						restoreControlled(element);
+					}
+				});
 			}
 		}
 	};
@@ -3207,8 +3615,7 @@ const restoreEffectHooks = (mark: number) => {
 	effectRestores.length = mark;
 };
 
-const flushPassiveEffects = (root: Root, synchronous: boolean) => {
-	const effects = root.effects;
+const flushPassiveEffects = (root: Root, effects: PendingEffect | null, synchronous: boolean) => {
 	const cleanups = root.queues[CommitQueue.PassiveCleanup];
 	root.queues[CommitQueue.PassiveCleanup] = [];
 	if (cleanups.length === 0 && !hasPassiveEffect(effects)) {
@@ -3256,7 +3663,837 @@ const runEffects = (head: PendingEffect | null, kind: EffectKind) => {
 
 // #endregion
 
+// #region view transitions
+
+interface TransitionFrame {
+	// boundaries a reveal or insertion brought in, and those a hide or removal took out.
+	enters: Fiber[];
+	exits: Fiber[];
+	// roots of inserted and removed subtrees, searched for named pairs.
+	inserted: Fiber[];
+	removed: Fiber[];
+	// boundaries owning a host mutation, and the host targets boundaries had before this pass.
+	mutated: Set<Fiber>;
+	oldTargets: Map<Fiber, HostElement[]>;
+	// sibling lists whose set or order changed.
+	scopes: Fiber[][];
+	types: string[];
+}
+
+const enum Trigger {
+	Enter,
+	Exit,
+	Share,
+	Update,
+}
+
+// the class prop and event prop for each `Trigger`.
+const triggerClasses = ['enter', 'exit', 'share', 'update'];
+const triggerEvents = ['onEnter', 'onExit', 'onShare', 'onUpdate'];
+
+interface Participant {
+	fiber: Fiber;
+	// the incoming half of a pair animates without an event of its own.
+	notify: boolean;
+	trigger: Trigger;
+}
+
+// a surviving boundary that may update; whether it does is known once the new layout is.
+interface UpdateCandidate {
+	className: string | null;
+	fiber: Fiber;
+	mutated: boolean;
+	oldElements: HostElement[];
+	oldRects: DOMRect[];
+}
+
+// a boundary entering or leaving, before it is known to have anything on screen.
+interface Placement {
+	className: string | null;
+	elements: HostElement[];
+	fiber: Fiber;
+	notify: boolean;
+	trigger: Trigger;
+}
+
+interface TransitionPlan {
+	candidates: UpdateCandidate[];
+	document: Document;
+	enters: Fiber[];
+	frame: TransitionFrame;
+	// boundaries already given a role, so none animates twice.
+	handled: Set<Fiber>;
+	// elements carrying a temporary name, restored once the browser has captured them.
+	named: HostElement[];
+	// explicit names shared by an outgoing and an incoming boundary, to the incoming one.
+	pairs: Map<string, Fiber>;
+	participants: Participant[];
+}
+
+// mounted boundaries with an explicit name; pairs are only searched for while there are some.
+let namedBoundaries = 0;
+let nextAutoName = 0;
+const autoNames = new WeakMap<Fiber, string>();
+// the document's running view transition, which later transition work waits behind.
+let activeTransition: ViewTransition | null = null;
+const waitingRoots: Root[] = [];
+
+const isExplicitName = (name: unknown): name is string => typeof name === 'string' && name !== 'auto';
+
+const boundaryName = (fiber: Fiber): string => {
+	const name = fiber.props.name;
+	if (isExplicitName(name)) {
+		return name;
+	}
+	let auto = autoNames.get(fiber);
+	if (auto === undefined) {
+		auto = `_scion-vt-${(nextAutoName++).toString(36)}`;
+		autoNames.set(fiber, auto);
+	}
+	return auto;
+};
+
+// a name that is not a valid identifier is encoded; it still works, but can't be selected in CSS.
+const cssName = (name: string): string => {
+	if (CSS.escape(name) === name) {
+		return name;
+	}
+	let binary = '';
+	for (const byte of new TextEncoder().encode(name)) {
+		binary += String.fromCharCode(byte);
+	}
+	return `r-${btoa(binary).replace(/=/g, '')}`;
+};
+
+const noteMutation = () => {
+	const frame = transitionFrame;
+	const boundary = enclosingBoundary;
+	if (hasViewTransition && frame !== null && boundary !== null && !frame.mutated.has(boundary)) {
+		// the first mutation is recorded before any fiber below it changes, so these are the
+		// targets the old snapshot shows.
+		frame.oldTargets.set(boundary, hostTargets(boundary, true, []));
+		frame.mutated.add(boundary);
+	}
+};
+
+// `setProp` writes nothing for these, and handlers swap on every render without changing a pixel.
+const invisibleProps = new Set([
+	'autoFocus',
+	'children',
+	'key',
+	'ref',
+	'suppressContentEditableWarning',
+	'suppressHydrationWarning',
+]);
+
+const isVisualProp = (name: string): boolean => !invisibleProps.has(name) && !name.startsWith('on');
+
+const sameStyle = (previous: any, next: any): boolean => {
+	if (previous == null || next == null) {
+		return previous == next;
+	}
+	for (const name in next) {
+		if (!Object.is(previous[name], next[name])) {
+			return false;
+		}
+	}
+	for (const name in previous) {
+		if (!(name in next)) {
+			return false;
+		}
+	}
+	return true;
+};
+
+const hasVisualChange = (previous: Props, next: Props): boolean => {
+	for (const name in next) {
+		if (
+			isVisualProp(name) &&
+			!Object.is(previous[name], next[name]) &&
+			(name !== 'style' || !sameStyle(previous.style, next.style))
+		) {
+			return true;
+		}
+	}
+	for (const name in previous) {
+		if (isVisualProp(name) && !Object.hasOwn(next, name)) {
+			return true;
+		}
+	}
+	return false;
+};
+
+// the outermost boundaries of a subtree that no host node encloses.
+const collectBoundaries = (fiber: Fiber, result: Fiber[]) => {
+	switch (fiber.kind) {
+		case FiberKind.ViewTransition: {
+			result.push(fiber);
+			return;
+		}
+		case FiberKind.Host:
+		case FiberKind.Portal:
+		case FiberKind.Text: {
+			return;
+		}
+		case FiberKind.Activity: {
+			if ((fiber.flags & FiberFlag.Hidden) !== 0) {
+				return;
+			}
+			break;
+		}
+	}
+	collectChildBoundaries(fiber, result);
+};
+
+const collectChildBoundaries = (fiber: Fiber, result: Fiber[]) => {
+	for (const child of fiber.children) {
+		collectBoundaries(child, result);
+	}
+};
+
+// every visible boundary with an explicit name, however deep.
+const collectNamed = (fiber: Fiber, result: Map<string, Fiber>) => {
+	if (fiber.kind === FiberKind.Activity && (fiber.flags & FiberFlag.Hidden) !== 0) {
+		return;
+	}
+	if (fiber.kind === FiberKind.ViewTransition && isExplicitName(fiber.props.name)) {
+		result.set(fiber.props.name, fiber);
+	}
+	for (const child of fiber.children) {
+		collectNamed(child, result);
+	}
+};
+
+// the nearest host elements of a boundary; an update leaves nested boundaries to animate themselves.
+const hostTargets = (fiber: Fiber, stopAtBoundaries: boolean, result: HostElement[]): HostElement[] => {
+	for (const child of fiber.children) {
+		switch (child.kind) {
+			case FiberKind.Host: {
+				result.push(child.node);
+				break;
+			}
+			case FiberKind.Portal:
+			case FiberKind.Text: {
+				break;
+			}
+			case FiberKind.Activity: {
+				if ((child.flags & FiberFlag.Hidden) === 0) {
+					hostTargets(child, stopAtBoundaries, result);
+				}
+				break;
+			}
+			case FiberKind.ViewTransition: {
+				if (!stopAtBoundaries) {
+					hostTargets(child, stopAtBoundaries, result);
+				}
+				break;
+			}
+			default: {
+				hostTargets(child, stopAtBoundaries, result);
+			}
+		}
+	}
+	return result;
+};
+
+// the sibling list a boundary sits in, looking through wrappers that hold nothing else.
+const siblingScope = (fiber: Fiber): Fiber[] => {
+	let scope = fiber;
+	while (
+		scope.parent !== null &&
+		scope.parent.children.length === 1 &&
+		scope.parent.kind !== FiberKind.Host &&
+		scope.parent.kind !== FiberKind.Portal &&
+		scope.parent.kind !== FiberKind.ViewTransition
+	) {
+		scope = scope.parent;
+	}
+	return scope.parent ? scope.parent.children : scope.root.fibers;
+};
+
+const classByType = (value: any, types: string[]): string | null | undefined => {
+	if (value == null || typeof value === 'string') {
+		return value;
+	}
+	let className: string | null = null;
+	for (const type of types) {
+		const match = value[type];
+		if (match != null) {
+			if (match === 'none') {
+				return 'none';
+			}
+			className = className === null ? match : `${className} ${match}`;
+		}
+	}
+	return className ?? value.default;
+};
+
+// the class a boundary animates with for a trigger; null is the browser default, 'none' opts out.
+const transitionClass = (props: Props, trigger: Trigger, types: string[]): string | null => {
+	const base = classByType(props.default, types);
+	const event = classByType(props[triggerClasses[trigger]], types);
+	if (event == null) {
+		return base == null || base === 'auto' ? null : base;
+	}
+	return event === 'auto' ? null : event;
+};
+
+const isInViewport = (rect: DOMRect, window: Window): boolean =>
+	rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+
+const anyInViewport = (rects: DOMRect[], window: Window): boolean => {
+	for (const rect of rects) {
+		if (isInViewport(rect, window)) {
+			return true;
+		}
+	}
+	return false;
+};
+
+const measure = (elements: HostElement[]): DOMRect[] => elements.map((element) => element.getBoundingClientRect());
+
+const sameRects = (previous: DOMRect[], next: DOMRect[]): boolean => {
+	if (previous.length !== next.length) {
+		return false;
+	}
+	for (let index = 0; index < previous.length; index++) {
+		const a = previous[index];
+		const b = next[index];
+		if (a.x !== b.x || a.y !== b.y || a.width !== b.width || a.height !== b.height) {
+			return false;
+		}
+	}
+	return true;
+};
+
+const partName = (name: string, index: number): string => (index === 0 ? name : `${name}_${index}`);
+
+const nameElements = (plan: TransitionPlan, elements: HostElement[], name: string, className: string | null) => {
+	const escaped = cssName(name);
+	for (let index = 0; index < elements.length; index++) {
+		const style = elements[index].style;
+		style.setProperty('view-transition-name', partName(escaped, index));
+		style.setProperty('view-transition-class', className ?? '');
+		plan.named.push(elements[index]);
+	}
+};
+
+// puts back whatever the element's own style prop says about view transitions.
+const restoreNames = (elements: HostElement[]) => {
+	for (const element of elements) {
+		const style = element.__scionFiber?.props.style;
+		element.style.setProperty('view-transition-name', String(style?.viewTransitionName ?? ''));
+		element.style.setProperty('view-transition-class', String(style?.viewTransitionClass ?? ''));
+	}
+};
+
+const supportsViewTransitions = (document: Document): boolean => {
+	// object options and types arrived after the first shipping version; animate only with both.
+	const Type = Reflect.get(document.defaultView ?? {}, 'ViewTransition');
+	return (
+		typeof document.startViewTransition === 'function' &&
+		typeof Type === 'function' &&
+		'types' in Type.prototype
+	);
+};
+
+// starts recording what a pass may animate, if its work came from transitions alone.
+const openTransitionFrame = (root: Root): TransitionFrame | null => {
+	const eligible = root.transitionLane && !root.urgentLane && synchronousEffects === 0;
+	const types = root.transitionTypes ?? [];
+	root.transitionLane = false;
+	root.urgentLane = false;
+	root.transitionTypes = null;
+	if (!eligible || !supportsViewTransitions(root.container.ownerDocument)) {
+		return null;
+	}
+	return {
+		enters: [],
+		exits: [],
+		inserted: [],
+		mutated: new Set(),
+		oldTargets: new Map(),
+		removed: [],
+		scopes: [],
+		types,
+	};
+};
+
+const releaseWaitingRoots = () => {
+	const released = waitingRoots.splice(0);
+	for (const root of released) {
+		if (!root.disposed && !root.scheduled) {
+			root.scheduled = true;
+			dirtyRoots.push(root);
+		}
+	}
+	if (released.length !== 0) {
+		flushRoots();
+	}
+};
+
+// transition work waits for the running view transition, batching into one later pass. urgent
+// work can't wait; `renderRootWork` lands any pass still waiting on its snapshot before it renders.
+const holdForViewTransition = (root: Root): boolean => {
+	if (root.urgentLane || synchronousEffects > 0) {
+		return false;
+	}
+	if (root.pendingCommit !== null || (activeTransition !== null && root.transitionLane)) {
+		if (!waitingRoots.includes(root)) {
+			waitingRoots.push(root);
+		}
+		return true;
+	}
+	return false;
+};
+
+// names the old state of everything that may animate, or returns null when nothing can.
+const planViewTransition = (document: Document, frame: TransitionFrame): TransitionPlan | null => {
+	const window = document.defaultView!;
+	const types = frame.types;
+	const plan: TransitionPlan = {
+		candidates: [],
+		document,
+		enters: [...frame.enters],
+		frame,
+		handled: new Set(),
+		named: [],
+		pairs: new Map(),
+		participants: [],
+	};
+
+	for (const fiber of frame.inserted) {
+		if (!isUnmounted(fiber) && !isDeactivated(fiber)) {
+			collectBoundaries(fiber, plan.enters);
+		}
+	}
+
+	const outgoing: Placement[] = [];
+	if (namedBoundaries > 0 && frame.removed.length !== 0 && frame.inserted.length !== 0) {
+		const before = new Map<string, Fiber>();
+		const after = new Map<string, Fiber>();
+		for (const fiber of frame.removed) {
+			collectNamed(fiber, before);
+		}
+		for (const fiber of frame.inserted) {
+			if (!isUnmounted(fiber)) {
+				collectNamed(fiber, after);
+			}
+		}
+		for (const [name, fiber] of before) {
+			const incoming = after.get(name);
+			const className = transitionClass(fiber.props, Trigger.Share, types);
+			if (
+				incoming === undefined ||
+				className === 'none' ||
+				transitionClass(incoming.props, Trigger.Share, types) === 'none'
+			) {
+				continue;
+			}
+			plan.pairs.set(name, incoming);
+			plan.handled.add(fiber);
+			outgoing.push({
+				className,
+				elements: hostTargets(fiber, false, []),
+				fiber,
+				notify: true,
+				trigger: Trigger.Share,
+			});
+		}
+	}
+
+	for (const fiber of frame.exits) {
+		if (plan.handled.has(fiber)) {
+			continue;
+		}
+		plan.handled.add(fiber);
+		const className = transitionClass(fiber.props, Trigger.Exit, types);
+		if (className !== 'none') {
+			outgoing.push({
+				className,
+				elements: hostTargets(fiber, false, []),
+				fiber,
+				notify: true,
+				trigger: Trigger.Exit,
+			});
+		}
+	}
+
+	const updating = new Set(frame.mutated);
+	const swept = new Set<Fiber[]>();
+	const sweep = (scope: Fiber[]) => {
+		if (swept.has(scope)) {
+			return;
+		}
+		swept.add(scope);
+		const found: Fiber[] = [];
+		for (const fiber of scope) {
+			collectBoundaries(fiber, found);
+		}
+		for (const boundary of found) {
+			updating.add(boundary);
+		}
+	};
+	for (const scope of frame.scopes) {
+		sweep(scope);
+	}
+	for (const fiber of frame.mutated) {
+		sweep(siblingScope(fiber));
+		for (let parent = fiber.parent; parent !== null && !updating.has(parent); parent = parent.parent) {
+			if (parent.kind === FiberKind.ViewTransition) {
+				updating.add(parent);
+			}
+		}
+	}
+	const entering = new Set(plan.enters);
+	for (const fiber of updating) {
+		if (plan.handled.has(fiber) || entering.has(fiber) || isUnmounted(fiber)) {
+			continue;
+		}
+		plan.handled.add(fiber);
+		const className = transitionClass(fiber.props, Trigger.Update, types);
+		if (className === 'none') {
+			continue;
+		}
+		const oldElements = (frame.oldTargets.get(fiber) ?? hostTargets(fiber, true, [])).filter(
+			(element) => element.isConnected,
+		);
+		if (oldElements.length !== 0) {
+			plan.candidates.push({
+				className,
+				fiber,
+				mutated: frame.mutated.has(fiber),
+				oldElements,
+				oldRects: [],
+			});
+		}
+	}
+
+	// every layout read happens before the first name is written.
+	for (const candidate of plan.candidates) {
+		candidate.oldRects = measure(candidate.oldElements);
+	}
+	for (const entry of outgoing) {
+		entry.elements = entry.elements.filter((element) => element.isConnected);
+	}
+	for (const { fiber, trigger } of placeEntries(plan, outgoing, window)) {
+		// a pair whose outgoing side has nothing on screen falls back to a plain enter.
+		if (trigger === Trigger.Share) {
+			plan.pairs.delete(fiber.props.name);
+		}
+	}
+	for (const candidate of plan.candidates) {
+		nameElements(plan, candidate.oldElements, boundaryName(candidate.fiber), candidate.className);
+	}
+
+	if (plan.participants.length === 0 && plan.candidates.length === 0 && plan.enters.length === 0) {
+		return null;
+	}
+	return plan;
+};
+
+// names the new state once the pass has committed, and cancels the candidates that didn't move.
+const finalizeViewTransition = (plan: TransitionPlan, animations: Animation[], suppressRoot: boolean) => {
+	const { document, frame } = plan;
+	const window = document.defaultView!;
+	const documentElement = document.documentElement;
+	const types = frame.types;
+
+	const incoming: Placement[] = [];
+	const enter = (fiber: Fiber, trigger: Trigger) => {
+		if (plan.handled.has(fiber) || isUnmounted(fiber)) {
+			return;
+		}
+		plan.handled.add(fiber);
+		const className = transitionClass(fiber.props, trigger, types);
+		if (className !== 'none') {
+			// the incoming half of a pair animates without an event of its own.
+			const notify = trigger === Trigger.Enter;
+			incoming.push({ className, elements: hostTargets(fiber, false, []), fiber, notify, trigger });
+		}
+	};
+	for (const fiber of plan.enters) {
+		enter(fiber, plan.pairs.get(fiber.props.name) === fiber ? Trigger.Share : Trigger.Enter);
+	}
+	// the incoming half of a pair can sit deep inside what was inserted.
+	for (const fiber of plan.pairs.values()) {
+		enter(fiber, Trigger.Share);
+	}
+
+	// every layout read happens before the first new name is written.
+	const newElements = plan.candidates.map((candidate) =>
+		isUnmounted(candidate.fiber) ? [] : hostTargets(candidate.fiber, true, []),
+	);
+	const newRects = newElements.map(measure);
+	placeEntries(plan, incoming, window);
+
+	const animating = new Set<Fiber>();
+	for (const participant of plan.participants) {
+		animating.add(participant.fiber);
+	}
+
+	const unchanged: number[] = [];
+	for (let index = 0; index < plan.candidates.length; index++) {
+		const candidate = plan.candidates[index];
+		const changed = candidate.mutated || !sameRects(candidate.oldRects, newRects[index]);
+		const visible = anyInViewport(candidate.oldRects, window) || anyInViewport(newRects[index], window);
+		if (changed && visible) {
+			nameElements(plan, newElements[index], boundaryName(candidate.fiber), candidate.className);
+			plan.participants.push({ fiber: candidate.fiber, notify: true, trigger: Trigger.Update });
+			animating.add(candidate.fiber);
+		} else {
+			unchanged.push(index);
+		}
+	}
+
+	for (const index of unchanged) {
+		const candidate = plan.candidates[index];
+		// hiding a captured child would leave a hole in an animating parent, so it rides along unchanged.
+		if (hasAnimatingAncestor(candidate.fiber, animating)) {
+			nameElements(plan, newElements[index], boundaryName(candidate.fiber), candidate.className);
+			continue;
+		}
+		// the old snapshot is already taken; hiding its group leaves the live element showing.
+		const escaped = cssName(boundaryName(candidate.fiber));
+		for (let part = 0; part < candidate.oldElements.length; part++) {
+			animations.push(
+				documentElement.animate(
+					{ opacity: [0, 0], pointerEvents: ['none', 'none'] },
+					{
+						duration: 0,
+						fill: 'forwards',
+						pseudoElement: `::view-transition-group(${partName(escaped, part)})`,
+					},
+				),
+			);
+		}
+	}
+
+	// with the page itself uncaptured, let pointer events through to whatever isn't animating.
+	if (suppressRoot) {
+		animations.push(
+			documentElement.animate(
+				{ height: [0, 0], width: [0, 0] },
+				{ duration: 0, fill: 'forwards', pseudoElement: '::view-transition' },
+			),
+		);
+	}
+};
+
+// names the entries with something on screen and makes them participants, measuring all of them
+// before writing any name. returns the entries left out.
+const placeEntries = (plan: TransitionPlan, entries: Placement[], window: Window): Placement[] => {
+	const rects = entries.map((entry) => measure(entry.elements));
+	const skipped: Placement[] = [];
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index];
+		if (entry.elements.length === 0 || !anyInViewport(rects[index], window)) {
+			skipped.push(entry);
+			continue;
+		}
+		nameElements(plan, entry.elements, boundaryName(entry.fiber), entry.className);
+		plan.participants.push({ fiber: entry.fiber, notify: entry.notify, trigger: entry.trigger });
+	}
+	return skipped;
+};
+
+// the animation can run for seconds; past finalizing, only names, participants, and types are read,
+// so the removed subtrees and measurements the rest holds can go.
+const releaseTransitionPlan = (plan: TransitionPlan) => {
+	const frame = plan.frame;
+	plan.candidates = [];
+	plan.enters = [];
+	plan.handled.clear();
+	plan.pairs.clear();
+	frame.enters = [];
+	frame.exits = [];
+	frame.inserted = [];
+	frame.removed = [];
+	frame.scopes = [];
+	frame.mutated.clear();
+	frame.oldTargets.clear();
+};
+
+const hasAnimatingAncestor = (fiber: Fiber, animating: Set<Fiber>): boolean => {
+	for (let parent = fiber.parent; parent !== null; parent = parent.parent) {
+		if (animating.has(parent)) {
+			return true;
+		}
+	}
+	return false;
+};
+
+const pseudoElement = (document: Document, part: string, name: string) => {
+	const selector = `::view-transition-${part}(${name})`;
+	return {
+		animate(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
+			const timing: KeyframeAnimationOptions = typeof options === 'number' ? { duration: options } : { ...options };
+			timing.pseudoElement = selector;
+			return document.documentElement.animate(keyframes, timing);
+		},
+		getAnimations() {
+			return document.documentElement
+				.getAnimations({ subtree: true })
+				.filter((animation) => Reflect.get(animation.effect ?? {}, 'pseudoElement') === selector);
+		},
+		getComputedStyle() {
+			return document.defaultView!.getComputedStyle(document.documentElement, selector);
+		},
+	};
+};
+
+const transitionInstance = (fiber: Fiber) => {
+	const document = fiber.root.container.ownerDocument;
+	const name = cssName(boundaryName(fiber));
+	return {
+		group: pseudoElement(document, 'group', name),
+		imagePair: pseudoElement(document, 'image-pair', name),
+		name,
+		new: pseudoElement(document, 'new', name),
+		old: pseudoElement(document, 'old', name),
+	};
+};
+
+const dispatchTransitionEvents = (plan: TransitionPlan, cleanups: Array<() => void>) => {
+	const types = [...plan.frame.types];
+	for (const participant of plan.participants) {
+		if (!participant.notify) {
+			continue;
+		}
+		const handler = participant.fiber.props[triggerEvents[participant.trigger]];
+		if (typeof handler === 'function') {
+			try {
+				const cleanup = handler(transitionInstance(participant.fiber), types);
+				if (typeof cleanup === 'function') {
+					cleanups.push(cleanup);
+				}
+			} catch (error) {
+				reportAsync(error);
+			}
+		}
+	}
+};
+
+// hands a rendered pass to the browser to commit between its old and new snapshots. returns false
+// when nothing participates, leaving the caller to commit as usual.
+const startViewTransitionFrame = (root: Root, frame: TransitionFrame, failed: boolean): boolean => {
+	const document = root.container.ownerDocument;
+	const plan = planViewTransition(document, frame);
+	if (plan === null) {
+		return false;
+	}
+
+	const documentElement = document.documentElement;
+	// the page stays live and uncaptured, so only participating boundaries animate.
+	const suppressRoot = documentElement.style.getPropertyValue('view-transition-name') === '';
+	if (suppressRoot) {
+		documentElement.style.setProperty('view-transition-name', 'none');
+	}
+	const restoreRoot = () => {
+		if (suppressRoot && documentElement.style.getPropertyValue('view-transition-name') === 'none') {
+			documentElement.style.removeProperty('view-transition-name');
+		}
+	};
+
+	const animations: Animation[] = [];
+	const cleanups: Array<() => void> = [];
+	let committed = false;
+	const commit = (): boolean => {
+		if (committed) {
+			return false;
+		}
+		committed = true;
+		root.pendingCommit = null;
+		// the browser calls back outside any flush, so guard the commit as one would: a flushSync
+		// from a layout effect then queues its work for the drain below instead of nesting.
+		const wasFlushing = flushing;
+		flushing = true;
+		try {
+			commitRoot(root, failed);
+		} finally {
+			flushing = wasFlushing;
+		}
+		drainCascade(root);
+		flushRoots();
+		return true;
+	};
+
+	let transition: ViewTransition;
+	try {
+		transition = document.startViewTransition({
+			update() {
+				// a skipped transition still calls back, after the pass has already committed.
+				if (!commit()) {
+					return;
+				}
+				try {
+					finalizeViewTransition(plan, animations, suppressRoot);
+				} catch (error) {
+					reportAsync(error);
+				} finally {
+					releaseTransitionPlan(plan);
+				}
+			},
+			types: frame.types,
+		});
+	} catch {
+		restoreNames(plan.named);
+		restoreRoot();
+		return false;
+	}
+
+	activeTransition = transition;
+	root.pendingCommit = () => {
+		transition.skipTransition();
+		commit();
+	};
+	transition.ready.then(
+		() => {
+			restoreNames(plan.named);
+			dispatchTransitionEvents(plan, cleanups);
+		},
+		() => {
+			commit();
+			restoreNames(plan.named);
+		},
+	);
+	// an app's cleanup can throw; the coordinator still has to let go of the document.
+	const settle = () => {
+		for (const cleanup of cleanups) {
+			try {
+				cleanup();
+			} catch (error) {
+				reportAsync(error);
+			}
+		}
+		for (const animation of animations) {
+			animation.cancel();
+		}
+		restoreRoot();
+		if (activeTransition === transition) {
+			activeTransition = null;
+		}
+		releaseWaitingRoots();
+	};
+	transition.finished.then(settle, settle);
+	return true;
+};
+
+// #endregion
+
 // #region async and development tools
+
+// surfaces an error from a callback whose rejection nothing would observe, or from app code that
+// must not stop the caller, as an uncaught error.
+const reportAsync = (error: unknown) => {
+	if (typeof reportError === 'function') {
+		reportError(error);
+		return;
+	}
+	queueMicrotask(() => {
+		throw error;
+	});
+};
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> => {
 	if (!value || (typeof value !== 'object' && typeof value !== 'function')) {

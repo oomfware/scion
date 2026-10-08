@@ -42,6 +42,7 @@ test('react exports scion does not provide', () => {
 test('react-dom exports scion does not provide', () => {
 	expect(missingFrom(reactDom, scionDom)).toMatchInlineSnapshot(`
 		[
+		  "browser",
 		  "requestFormReset",
 		  "useFormState",
 		  "useFormStatus",

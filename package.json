@@ -72,8 +72,8 @@
 		"oxfmt": "^0.65.0",
 		"oxlint": "^1.80.0",
 		"oxlint-tsgolint": "^7.0.2001",
-		"react": "19.2.8",
-		"react-dom": "19.2.8",
+		"react": "19.3.0",
+		"react-dom": "19.3.0",
 		"react-refresh": "^0.18.0",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.11"

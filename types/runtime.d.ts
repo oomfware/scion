@@ -540,6 +540,60 @@ export interface ActivityProps {
 /** hides or reveals children while preserving their state. */
 export const Activity: ExoticComponent<ActivityProps>;
 
+/** a handle on one `::view-transition-*` pseudo-element of a running view transition. */
+export interface ViewTransitionPseudoElement {
+	animate(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions): Animation;
+	getAnimations(): Animation[];
+	getComputedStyle(): CSSStyleDeclaration;
+}
+
+/** the pseudo-elements of an animating `<ViewTransition>`. */
+export interface ViewTransitionInstance {
+	group: ViewTransitionPseudoElement;
+	imagePair: ViewTransitionPseudoElement;
+	/** the `view-transition-name` the boundary animates under. */
+	name: string;
+	new: ViewTransitionPseudoElement;
+	old: ViewTransitionPseudoElement;
+}
+
+/** a view transition class per transition type, falling back to `default` when none matches. */
+export type ViewTransitionClassPerType = Record<'default' | (string & {}), 'auto' | 'none' | (string & {})>;
+
+/** `'auto'` for the browser's animation, `'none'` to opt out, or a `view-transition-class`. */
+export type ViewTransitionClass = ViewTransitionClassPerType | ViewTransitionClassPerType[string];
+
+/** called when a boundary animates; the returned function runs when the animation finishes. */
+export type ViewTransitionEvent = (instance: ViewTransitionInstance, types: string[]) => void | (() => void);
+
+export interface ViewTransitionProps {
+	children?: ReactNode | undefined;
+	/** the class for every trigger without one of its own. */
+	default?: ViewTransitionClass | undefined;
+	/** the class when the boundary is inserted or revealed. */
+	enter?: ViewTransitionClass | undefined;
+	/** the class when the boundary is removed or hidden. */
+	exit?: ViewTransitionClass | undefined;
+	/** pairs this boundary with one of the same name leaving or arriving elsewhere. @default 'auto' */
+	name?: 'auto' | (string & {}) | undefined;
+	onEnter?: ViewTransitionEvent | undefined;
+	onExit?: ViewTransitionEvent | undefined;
+	/** called on the leaving side of a shared element pair, in place of `onExit` and `onEnter`. */
+	onShare?: ViewTransitionEvent | undefined;
+	onUpdate?: ViewTransitionEvent | undefined;
+	ref?: Ref<ViewTransitionInstance> | undefined;
+	/** the class when the boundary is part of a shared element pair. */
+	share?: ViewTransitionClass | undefined;
+	/** the class when the boundary's content changes or it moves or resizes. */
+	update?: ViewTransitionClass | undefined;
+}
+
+/**
+ * animates its children with the browser's view transitions when a transition or suspense reveal
+ * inserts, removes, changes, or moves them. synchronous updates never animate.
+ */
+export const ViewTransition: ExoticComponent<ViewTransitionProps>;
+
 // #endregion
 
 // #region events
@@ -2640,6 +2694,14 @@ export const ErrorBoundary: ExoticComponent<ErrorBoundaryProps>;
  * @param scope synchronous updates to batch
  */
 export function startTransition(scope: () => void): void;
+
+/**
+ * names the cause of the transition being started, so `<ViewTransition>` class maps and the
+ * browser's `:active-view-transition-type()` can tell transitions apart.
+ *
+ * @param type an arbitrary transition type; only meaningful inside `startTransition`
+ */
+export function addTransitionType(type: string): void;
 
 export function createPortal(
 	children: ReactNode,
