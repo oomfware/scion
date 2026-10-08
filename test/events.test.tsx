@@ -242,6 +242,31 @@ test('focus and blur handlers fire on the delegated focusin/focusout pair', asyn
 	});
 });
 
+test('pointer capture events support bubble and capture handlers', async () => {
+	await expectAgreement(async (scenario) => {
+		await scenario.render(
+			<div
+				onGotPointerCaptureCapture={() => scenario.log('outer got capture')}
+				onGotPointerCapture={() => scenario.log('outer got bubble')}
+				onLostPointerCaptureCapture={() => scenario.log('outer lost capture')}
+				onLostPointerCapture={() => scenario.log('outer lost bubble')}
+			>
+				<button
+					onGotPointerCapture={() => scenario.log('inner got')}
+					onLostPointerCapture={() => scenario.log('inner lost')}
+				>
+					go
+				</button>
+			</div>,
+		);
+		await scenario.act(() => {
+			const button = scenario.container.querySelector('button')!;
+			button.dispatchEvent(new Event('gotpointercapture', { bubbles: true }));
+			button.dispatchEvent(new Event('lostpointercapture', { bubbles: true }));
+		});
+	});
+});
+
 test('the runtimes source mouseenter from different native events', async () => {
 	const scenario = async (helper: Scenario) => {
 		await helper.render(

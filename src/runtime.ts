@@ -2967,7 +2967,8 @@ const eventProxy = createEventProxy(false);
 const eventProxyCapture = createEventProxy(true);
 
 const setEvent = (element: HostElement, prop: string, handler: any, fiber: Fiber) => {
-	const capture = prop.endsWith('Capture');
+	// pointer capture event names end in `Capture` even for bubble handlers.
+	const capture = prop.endsWith('Capture') && !prop.endsWith('PointerCapture');
 	const reactName = prop.slice(2, capture ? -7 : undefined);
 	const name = eventNames[reactName] ?? reactName.toLowerCase();
 	const key = handlerKey(name, capture);
