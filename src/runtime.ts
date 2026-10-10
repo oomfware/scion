@@ -993,8 +993,8 @@ export const startTransition = (callback: () => void) => {
 };
 
 /**
- * names the cause of the transition being started, so `<ViewTransition>` class maps and the
- * browser's `:active-view-transition-type()` can tell transitions apart.
+ * names the cause of the transition being started, so `<ViewTransition>` class maps and the browser's
+ * `:active-view-transition-type()` can tell transitions apart.
  *
  * @param type an arbitrary transition type; only meaningful inside `startTransition`
  */
@@ -1720,7 +1720,12 @@ const reconcileChildren = (
 	}
 
 	// a changed set or order of siblings can shift the boundaries among them.
-	if (hasViewTransition && transitionFrame !== null && next !== null && (mounted !== null || moved || removed)) {
+	if (
+		hasViewTransition &&
+		transitionFrame !== null &&
+		next !== null &&
+		(mounted !== null || moved || removed)
+	) {
 		transitionFrame.scopes.push(next);
 	}
 
@@ -1969,7 +1974,11 @@ const updateFiber = (
 					// a host re-rendered by its parent usually changes only its children array.
 					if (hostPropsDiffer(previousProps, vnode.props)) {
 						fiber.root.ops.push(HostOp.Props, element, previousProps, vnode.props, fiber);
-						if (hasViewTransition && transitionFrame !== null && hasVisualChange(previousProps, vnode.props)) {
+						if (
+							hasViewTransition &&
+							transitionFrame !== null &&
+							hasVisualChange(previousProps, vnode.props)
+						) {
 							noteMutation();
 						}
 					}
@@ -2611,7 +2620,8 @@ const createFiber = (
 
 // `instanceof` reads no property of the container, see `insertChild`.
 const hostNamespace = (container: HostContainer, type: string): string => {
-	return type === 'svg' || (container instanceof SVGElement && !(container instanceof SVGForeignObjectElement))
+	return type === 'svg' ||
+		(container instanceof SVGElement && !(container instanceof SVGForeignObjectElement))
 		? SVG_NAMESPACE
 		: HTML_NAMESPACE;
 };
@@ -2647,7 +2657,8 @@ const removeNode = (node: Node) => {
 
 const moveNode = (container: HostContainer, node: Node, before: Node | null) => {
 	if (SUPPORTS_MOVE_BEFORE && parentOf(node) === container) {
-		const move = container instanceof Element ? domPrototypes!.elementMoveBefore : domPrototypes!.fragmentMoveBefore;
+		const move =
+			container instanceof Element ? domPrototypes!.elementMoveBefore : domPrototypes!.fragmentMoveBefore;
 		move!.call(container, node, before);
 	} else {
 		insertChild(container, node, before);
@@ -2678,7 +2689,7 @@ const hostOpWidths = [4, 2, 5, 2, 2, 2, 3];
 // render already treated every op as done, so one that throws can't stop the ones after it.
 const replayHostOps = (ops: any[]) => {
 	let failure: { error: unknown } | null = null;
-	for (let index = 0; index < ops.length; ) {
+	for (let index = 0; index < ops.length;) {
 		const op: HostOp = ops[index];
 		try {
 			switch (op) {
@@ -3272,9 +3283,9 @@ const unitless = new Set([
 
 type StyleValue = string | number | null | undefined;
 
-const assertStyleObject: (style: unknown) => asserts style is Record<string, StyleValue> | null | undefined = (
-	style,
-) => {
+const assertStyleObject: (
+	style: unknown,
+) => asserts style is Record<string, StyleValue> | null | undefined = (style) => {
 	if (typeof style === 'string') {
 		throw new TypeError(`the \`style\` prop expects a property-to-value mapping, not a string.`);
 	}
@@ -3950,7 +3961,8 @@ const anyInViewport = (rects: DOMRect[], window: Window): boolean => {
 	return false;
 };
 
-const measure = (elements: HostElement[]): DOMRect[] => elements.map((element) => element.getBoundingClientRect());
+const measure = (elements: HostElement[]): DOMRect[] =>
+	elements.map((element) => element.getBoundingClientRect());
 
 const sameRects = (previous: DOMRect[], next: DOMRect[]): boolean => {
 	if (previous.length !== next.length) {
@@ -3968,7 +3980,12 @@ const sameRects = (previous: DOMRect[], next: DOMRect[]): boolean => {
 
 const partName = (name: string, index: number): string => (index === 0 ? name : `${name}_${index}`);
 
-const nameElements = (plan: TransitionPlan, elements: HostElement[], name: string, className: string | null) => {
+const nameElements = (
+	plan: TransitionPlan,
+	elements: HostElement[],
+	name: string,
+	className: string | null,
+) => {
 	const escaped = cssName(name);
 	for (let index = 0; index < elements.length; index++) {
 		const style = elements[index].style;
@@ -4326,8 +4343,12 @@ const hasAnimatingAncestor = (fiber: Fiber, animating: Set<Fiber>): boolean => {
 const pseudoElement = (document: Document, part: string, name: string) => {
 	const selector = `::view-transition-${part}(${name})`;
 	return {
-		animate(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
-			const timing: KeyframeAnimationOptions = typeof options === 'number' ? { duration: options } : { ...options };
+		animate(
+			keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
+			options?: number | KeyframeAnimationOptions,
+		) {
+			const timing: KeyframeAnimationOptions =
+				typeof options === 'number' ? { duration: options } : { ...options };
 			timing.pseudoElement = selector;
 			return document.documentElement.animate(keyframes, timing);
 		},

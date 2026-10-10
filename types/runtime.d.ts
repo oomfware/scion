@@ -542,7 +542,10 @@ export const Activity: ExoticComponent<ActivityProps>;
 
 /** a handle on one `::view-transition-*` pseudo-element of a running view transition. */
 export interface ViewTransitionPseudoElement {
-	animate(keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions): Animation;
+	animate(
+		keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
+		options?: number | KeyframeAnimationOptions,
+	): Animation;
 	getAnimations(): Animation[];
 	getComputedStyle(): CSSStyleDeclaration;
 }
@@ -589,8 +592,8 @@ export interface ViewTransitionProps {
 }
 
 /**
- * animates its children with the browser's view transitions when a transition or suspense reveal
- * inserts, removes, changes, or moves them. synchronous updates never animate.
+ * animates its children with the browser's view transitions when a transition or suspense reveal inserts,
+ * removes, changes, or moves them. synchronous updates never animate.
  */
 export const ViewTransition: ExoticComponent<ViewTransitionProps>;
 
@@ -2696,8 +2699,8 @@ export const ErrorBoundary: ExoticComponent<ErrorBoundaryProps>;
 export function startTransition(scope: () => void): void;
 
 /**
- * names the cause of the transition being started, so `<ViewTransition>` class maps and the
- * browser's `:active-view-transition-type()` can tell transitions apart.
+ * names the cause of the transition being started, so `<ViewTransition>` class maps and the browser's
+ * `:active-view-transition-type()` can tell transitions apart.
  *
  * @param type an arbitrary transition type; only meaningful inside `startTransition`
  */
